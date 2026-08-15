@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>QQQ / PSQ Switch</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div id="mode-banner" class="banner banner-unknown">
+  <span id="mode-text">connecting…</span>
+  <span id="market-text" class="banner-sub"></span>
+</div>
+
+<main>
+  <section class="actions">
+    <button id="btn-long" class="action action-long" data-command="GO_LONG">
+      <span class="action-title">GO LONG</span>
+      <span class="action-sub" id="long-sub">QQQ</span>
+    </button>
+    <button id="btn-short" class="action action-short" data-command="GO_SHORT">
+      <span class="action-title">GO SHORT</span>
+      <span class="action-sub" id="short-sub">PSQ</span>
+    </button>
+    <button id="btn-flat" class="action action-flat" data-command="GO_FLAT">
+      <span class="action-title">GO FLAT</span>
+      <span class="action-sub">CASH</span>
+    </button>
+  </section>
+
+  <section id="alerts"></section>
+
+  <section class="panel">
+    <h2>Combined</h2>
+    <div id="combined" class="combined-grid"><div class="muted">loading…</div></div>
+  </section>
+
+  <section id="brokers" class="broker-grid"></section>
+
+  <section class="panel">
+    <h2>All holdings</h2>
+    <div id="holdings"><div class="muted">loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Performance</h2>
+      <div id="chart-legend" class="legend"></div>
+    </div>
+    <p class="chart-caption">
+      Account value indexed to 100 at the start of the window, so accounts of
+      different sizes sit on one scale. Returns are time-weighted: deposits and
+      withdrawals are excluded.
+    </p>
+    <figure class="chart-figure">
+      <div id="nav-chart" class="chart"></div>
+      <figcaption id="chart-caption" class="muted"></figcaption>
+    </figure>
+    <div id="returns"><div class="muted">loading…</div></div>
+    <div id="perf-notes"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Activity</h2>
+      <button id="btn-refresh" class="small">Refresh</button>
+    </div>
+    <div id="events" class="events"><div class="muted">loading…</div></div>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="modal-title">Confirm</h3>
+    <p id="modal-body"></p>
+    <div class="modal-actions">
+      <button id="modal-cancel" class="small">Cancel</button>
+      <button id="modal-confirm" class="small danger">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div id="token-prompt" class="modal hidden">
+  <div class="modal-box">
+    <h3>API token required</h3>
+    <p class="muted">Paste the token printed when the server started.</p>
+    <input id="token-input" type="password" autocomplete="off" placeholder="API token">
+    <div class="modal-actions">
+      <button id="token-save" class="small">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

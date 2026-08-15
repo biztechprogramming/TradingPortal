@@ -1,0 +1,25 @@
+# Secrets and state must never enter the build context.
+.env
+.env.*
+!.env.example
+var/
+*.token.json
+schwab_token*.json
+
+# Local tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Not needed at runtime
+.git/
+.gitignore
+tests/
+docs/
+docker-compose*.yml
+Dockerfile

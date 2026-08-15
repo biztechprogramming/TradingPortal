@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Convenience wrapper: ./qqq doctor, ./qqq status, ./qqq long, ...
+#
+# Removes the two things that trip up a direct `python -m trading.cli` call:
+#   * the package lives under src/, so PYTHONPATH must include it
+#   * the dependencies live in .venv, not in the system interpreter
+#
+# Works from any directory.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Prefer the project venv; fall back to whatever python is active (which is
+# correct if you have already activated a venv or installed the package).
+if [ -x "$HERE/.venv/bin/python" ]; then
+    PY="$HERE/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+else
+    echo "No python interpreter found." >&2
+    exit 1
+fi
+
+if ! "$PY" -c "import httpx" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+Dependencies are missing from: $PY
+
+Set the project up first:
+    cd "$HERE"
+    python3 -m venv .venv
+    ./.venv/bin/pip install -r requirements-dev.txt
+EOF
+    exit 1
+fi
+
+export PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
+cd "$HERE"
+exec "$PY" -m trading.cli "$@"

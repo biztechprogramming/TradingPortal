@@ -1,0 +1,114 @@
+# QQQ/PSQ Switch — container stack.
+#
+#   cp .env.example .env && chmod 600 .env
+#   docker compose build
+#   docker compose run --rm -it app schwab-login --login personal
+#   docker compose up -d
+#   docker compose run --rm app accounts
+#
+# The IBKR gateway is NOT started by default; see the `ibkr` profile at the
+# bottom and docs/DOCKER.md for the two ways to connect one.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qqq-switch:latest
+    container_name: qqq-switch
+
+    # Credentials come from .env at runtime and are never baked into the image.
+    # Marked optional so a fresh clone can still `compose config` and start in
+    # dry-run; nothing real works until you `cp .env.example .env`.
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      # Inside the container we must bind all interfaces; the port publish
+      # below is what keeps it off the network. Config validation requires
+      # API_TOKEN whenever API_HOST is not loopback, so this cannot be left
+      # open by accident.
+      API_HOST: 0.0.0.0
+      LOG_DIR: /app/var/log
+      STATE_DIR: /app/var/state
+      # Reaching a Client Portal Gateway running on the HOST. Override to
+      # https://ibeam:5000/v1/api when using the bundled gateway profile.
+      IBKR_BASE_URL: ${IBKR_BASE_URL:-https://host.docker.internal:5000/v1/api}
+
+    # Published to loopback only. Change this and anyone who can reach the
+    # host on this port, with the token, can trade your accounts.
+    #
+    # API_PORT alone moves BOTH sides, which is what you almost always want.
+    # HOST_API_PORT is only for the unusual case of wanting the host port to
+    # differ from the container's.
+    ports:
+      - "127.0.0.1:${HOST_API_PORT:-${API_PORT:-8787}}:${API_PORT:-8787}"
+
+    volumes:
+      # Schwab refresh tokens, NAV history, execution lock, command state.
+      # Losing this means re-authorising every login by hand.
+      - qqq-state:/app/var
+
+    # Lets the container resolve a gateway running on the host. Harmless on
+    # Docker Desktop, required on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # Hardening: the application writes only to the mounted volume.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------
+  # Optional: IBKR Client Portal Gateway, kept alive headlessly by IBeam.
+  #
+  #   docker compose --profile ibkr up -d
+  #
+  # READ THIS FIRST. IBeam works by injecting your IBKR username and
+  # password into the gateway's login page, so those credentials sit in
+  # your .env and in the container's environment. That is a real and
+  # deliberate trade-off for running unattended. IBeam's own documentation
+  # recommends paper credentials for this reason. If you are not willing to
+  # store live IBKR credentials this way, run the gateway on the host
+  # instead and log in through a browser — see docs/DOCKER.md.
+  # ---------------------------------------------------------------------
+  ibeam:
+    image: voyz/ibeam:latest
+    container_name: qqq-ibeam
+    profiles: ["ibkr"]
+    environment:
+      # Set both in .env before enabling this profile. Deliberately NOT
+      # declared with compose's `:?` required form: that is interpolated even
+      # when the profile is disabled, which would break every command for
+      # anyone running the gateway on the host instead.
+      IBEAM_ACCOUNT: ${IBEAM_ACCOUNT:-}
+      IBEAM_PASSWORD: ${IBEAM_PASSWORD:-}
+      IBEAM_GATEWAY_STARTUP: 30
+      IBEAM_HEALTH_CHECK_INTERVAL: 60
+    ports:
+      # Loopback only; the app reaches it over the compose network by name.
+      - "127.0.0.1:5000:5000"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  qqq-state:
+    name: qqq-switch-state

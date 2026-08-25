@@ -131,6 +131,9 @@ function renderBanner(status) {
 function renderCombined(c) {
   longSymbol = c.long_symbol || 'QQQ';
   shortSymbol = c.short_symbol || 'PSQ';
+  // Chart set is server-driven, so adding a reference symbol is a config
+  // change rather than a frontend one.
+  if (c.chart_symbols?.length) chartSymbols = c.chart_symbols;
   $('long-sub').textContent = longSymbol;
   $('short-sub').textContent = shortSymbol;
 
@@ -562,6 +565,7 @@ const RANGES = [
 let rangeDays = 5;
 let candleData = {};
 let expandedSymbol = null;
+let chartSymbols = null;
 
 function renderRangePicker() {
   $('range-picker').innerHTML = RANGES.map((r) =>
@@ -576,11 +580,17 @@ function renderRangePicker() {
   }
 }
 
+function candleSymbols() {
+  return chartSymbols && chartSymbols.length
+    ? chartSymbols
+    : [longSymbol, shortSymbol];
+}
+
 async function refreshCandles(refresh = true) {
   if (!TOKEN) return;
   try {
     const results = await Promise.all(
-      [longSymbol, shortSymbol].map((sym) =>
+      candleSymbols().map((sym) =>
         api(`/api/candles?symbol=${encodeURIComponent(sym)}&refresh=${refresh}`)
           .then((r) => [sym, r.body])
           .catch(() => [sym, null])),
@@ -595,7 +605,7 @@ async function refreshCandles(refresh = true) {
 }
 
 function renderCandles() {
-  const symbols = [longSymbol, shortSymbol];
+  const symbols = candleSymbols();
   const host = $('candles');
   const charts = symbols.map((sym) => {
     const data = candleData[sym];
@@ -605,9 +615,12 @@ function renderCandles() {
       ? `<div class="alert alert-warn">${data.refresh.errors.map(esc).join('<br>')}</div>`
       : '';
     const isOpen = expandedSymbol === sym;
+    const refBadge = (chartSymbols || []).includes(sym)
+      && sym !== longSymbol && sym !== shortSymbol
+      ? '<span class="pill pill-anchor">REFERENCE</span>' : '';
     return `<div class="candle-block${isOpen ? ' candle-expanded' : ''}"
         data-block="${esc(sym)}">
-      <h3 class="sub-head">${esc(sym)}
+      <h3 class="sub-head">${esc(sym)}${refBadge}
         <span class="muted">${(data.bars || []).length} bars cached</span>
         <button class="small expand-btn" data-expand="${esc(sym)}">
           ${isOpen ? '✕ Close' : '⤢ Full screen'}</button>

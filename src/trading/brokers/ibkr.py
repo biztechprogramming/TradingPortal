@@ -482,24 +482,31 @@ class IBKRBroker(Broker):
             if symbol in self._conids:
                 return self._conids[symbol]
 
-        results = self._request(
-            "GET",
-            "/iserver/secdef/search",
-            params={"symbol": symbol, "name": "false", "secType": "STK"},
-        ) or []
-        if not isinstance(results, list):
-            raise ConfigError(f"IBKR contract search for {symbol} failed")
+        # Tried in order. STK first because the traded symbols are ETFs and
+        # that is the overwhelmingly common case; IND lets a reference symbol
+        # like NDX resolve, and FUT covers a futures reference. Anything
+        # genuinely ambiguous should be pinned with IBKR_CONID_<SYMBOL>.
+        for sec_type in ("STK", "IND", "FUT"):
+            results = self._request(
+                "GET",
+                "/iserver/secdef/search",
+                params={"symbol": symbol, "name": "false", "secType": sec_type},
+            ) or []
+            if not isinstance(results, list):
+                continue
 
-        for row in results:
-            if str(row.get("symbol", "")).upper() != symbol:
-                continue
-            conid = row.get("conid")
-            if conid is None:
-                continue
-            with self._lock:
-                self._conids[symbol] = int(conid)
-            log.info("IBKR resolved %s -> conid %s", symbol, conid)
-            return int(conid)
+            for row in results:
+                if str(row.get("symbol", "")).upper() != symbol:
+                    continue
+                conid = row.get("conid")
+                if conid is None:
+                    continue
+                with self._lock:
+                    self._conids[symbol] = int(conid)
+                log.info(
+                    "IBKR resolved %s -> conid %s (%s)", symbol, conid, sec_type
+                )
+                return int(conid)
 
         raise ConfigError(
             f"Could not resolve an IBKR conid for {symbol}. Set "

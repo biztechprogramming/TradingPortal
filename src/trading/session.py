@@ -68,6 +68,16 @@ class SessionRange:
         return bool(self.day_high > 0 and self.day_low > 0)
 
     @property
+    def has_swing_anchors(self) -> bool:
+        """Whether both swing levels are usable as ladder anchors."""
+        return bool(self.high_since_low > 0 and self.low_since_high > 0)
+
+    @property
+    def anchors(self) -> list[tuple[str, float]]:
+        """The two levels the ladder hangs off, as ``(code, price)``."""
+        return [("HSL", self.high_since_low), ("LSH", self.low_since_high)]
+
+    @property
     def low_came_first(self) -> bool | None:
         """True when the session bottomed before it topped."""
         if self.day_low_at is None or self.day_high_at is None:
@@ -93,6 +103,7 @@ class SessionRange:
             "session_start": self.session_start,
             "resolution_seconds": self.resolution_seconds,
             "low_came_first": self.low_came_first,
+            "has_swing_anchors": self.has_swing_anchors,
             "complete": self.complete,
             "source": self.source,
             "note": self.note,

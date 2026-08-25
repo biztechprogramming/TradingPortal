@@ -337,11 +337,13 @@ def create_app(
         refresh: bool = Query(True),
     ) -> dict[str, Any]:
         sym = symbol.upper().strip()
-        if sym not in {x.upper() for x in settings.symbols}:
+        # Charts cover the reference symbols too; trading does not. The order
+        # routes still validate against settings.symbols alone.
+        if sym not in {x.upper() for x in settings.chart_symbols}:
             raise HTTPException(
                 status_code=400,
                 detail=f"symbol {symbol!r} is not tracked; only "
-                       f"{sorted(settings.symbols)} are available",
+                       f"{sorted(settings.chart_symbols)} are available",
             )
         return service.candle_series(sym, days=days or None, refresh=refresh)
 

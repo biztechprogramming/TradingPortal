@@ -95,6 +95,12 @@ class Settings:
     # --- symbols ----------------------------------------------------------
     long_symbol: str = "QQQ"
     short_symbol: str = "PSQ"
+    #: Charted but NEVER traded. QQQ and PSQ both track the Nasdaq-100, so the
+    #: underlying is the thing that actually explains their moves. These are
+    #: deliberately kept out of :attr:`symbols`, which is the tradable
+    #: allowlist -- an order for one of these is rejected like any other
+    #: unknown ticker.
+    reference_symbols: tuple[str, ...] = ("NDX",)
 
     # --- brokers ----------------------------------------------------------
     brokers_enabled: tuple[str, ...] = ("schwab", "ibkr")
@@ -220,7 +226,15 @@ class Settings:
 
     @property
     def symbols(self) -> tuple[str, str]:
+        """The tradable pair. Never includes reference symbols."""
         return (self.long_symbol, self.short_symbol)
+
+    @property
+    def chart_symbols(self) -> tuple[str, ...]:
+        """Everything the dashboard charts: the tradable pair plus references."""
+        return self.symbols + tuple(
+            s for s in self.reference_symbols if s not in self.symbols
+        )
 
     def slippage_bps(self, side: str) -> float:
         return self.buy_slippage_bps if side == "BUY" else self.sell_slippage_bps
@@ -282,6 +296,8 @@ class Settings:
             "require_confirmation": self.require_confirmation,
             "long_symbol": self.long_symbol,
             "short_symbol": self.short_symbol,
+            "reference_symbols": list(self.reference_symbols),
+            "chart_symbols": list(self.chart_symbols),
             "brokers_enabled": list(self.brokers_enabled),
             "cash_buffer_dollars": self.cash_buffer_dollars,
             "allow_margin": self.allow_margin,
@@ -353,8 +369,18 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
     if unknown:
         raise ConfigError(f"Unknown broker(s) in BROKERS_ENABLED: {sorted(unknown)}")
 
+    reference_symbols = tuple(
+        v.strip().upper()
+        for v in (_env("REFERENCE_SYMBOLS", "NDX") or "").split(",")
+        if v.strip()
+    )
+
     conid_overrides: dict[str, int] = {}
-    for sym in ("QQQ", "PSQ"):
+    for sym in {
+        (_env("LONG_SYMBOL", "QQQ") or "QQQ").upper(),
+        (_env("SHORT_SYMBOL", "PSQ") or "PSQ").upper(),
+        *reference_symbols,
+    }:
         raw = _env(f"IBKR_CONID_{sym}")
         if raw:
             conid_overrides[sym] = int(raw)
@@ -414,6 +440,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         confirmation_ttl_seconds=_float("CONFIRMATION_TTL_SECONDS", 60.0),
         confirmation_phrase=_env("LIVE_CONFIRMATION_PHRASE", "EXECUTE") or "EXECUTE",
         long_symbol=(_env("LONG_SYMBOL", "QQQ") or "QQQ").upper(),
+        reference_symbols=reference_symbols,
         short_symbol=(_env("SHORT_SYMBOL", "PSQ") or "PSQ").upper(),
         brokers_enabled=brokers,
         schwab_app_key=_env("SCHWAB_APP_KEY"),
@@ -496,6 +523,13 @@ def validate_settings(s: Settings) -> None:
         )
     if s.long_symbol == s.short_symbol:
         raise ConfigError("LONG_SYMBOL and SHORT_SYMBOL must differ")
+    for sym in s.reference_symbols:
+        if sym in s.symbols:
+            raise ConfigError(
+                f"REFERENCE_SYMBOLS contains {sym}, which is already a traded "
+                "symbol. Reference symbols are chart-only and must not overlap "
+                "the tradable pair."
+            )
     if s.cash_buffer_dollars < 0:
         raise ConfigError("CASH_BUFFER_DOLLARS must be >= 0")
     if s.max_slippage_bps < max(s.buy_slippage_bps, s.sell_slippage_bps):

@@ -1,7 +1,15 @@
-"""Price ladder around the session high and low.
+"""Price ladder around the session's live swing.
 
 The ladder answers one question: *"buy this symbol if it reaches this price."*
-Rungs sit at ``HIGH ± n·step`` and ``LOW ± n·step``, and each rung is one
+
+Rungs hang off the two **swing** levels rather than the high and low of day:
+the *high since the low of day* and the *low since the high of day*. Those
+bracket the leg price is actually in. A high of day set at 06:00 that has been
+fading ever since is not a level anything is happening near, whereas the high
+made since the session bottomed is. Whichever day extreme came second is one
+of the two swing levels anyway, so nothing current is lost.
+
+Rungs sit at ``HSL ± n·step`` and ``LSH ± n·step``, and each rung is one
 click.
 
 Two behaviours here are deliberate and worth stating plainly, because both
@@ -9,8 +17,8 @@ have money consequences:
 
 **Every rung is a plain BUY limit order at exactly the rung price.** A buy
 limit at or above the current ask is *marketable* — it fills immediately at
-the market, not at the rung price. So the rungs above the session high do not
-wait for a breakout; they buy now. :attr:`RungView.marketable` flags exactly
+the market, not at the rung price. So the rungs above the market do not wait
+for a breakout; they buy now. :attr:`RungView.marketable` flags exactly
 which rungs behave that way so the dashboard can say so before the click. A
 rung below the market rests until the price comes down to it.
 
@@ -30,7 +38,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from . import audit as A
 from .audit import AuditLog
@@ -51,8 +59,20 @@ from .validation import check_market_hours, validate_order
 log = logging.getLogger("trading.ladder")
 
 #: What a rung is measured from.
-ANCHOR_HIGH = "HIGH"
-ANCHOR_LOW = "LOW"
+#:
+#: Not the high and low of day: those can both be hours stale and on the wrong
+#: side of what price is currently doing. The two swing levels bracket the
+#: *live* leg -- the run up since the session bottomed, and the pullback since
+#: it topped -- and one of them always coincides with the day extreme anyway,
+#: whichever came second. Short codes because they label a button.
+ANCHOR_HIGH_SINCE_LOW = "HSL"
+ANCHOR_LOW_SINCE_HIGH = "LSH"
+
+#: Long form, for the dashboard legend.
+ANCHOR_NAMES = {
+    ANCHOR_HIGH_SINCE_LOW: "high since low of day",
+    ANCHOR_LOW_SINCE_HIGH: "low since high of day",
+}
 
 
 def round_to_ladder_tick(price: float, tick: float) -> float:
@@ -113,7 +133,11 @@ class RungView(Rung):
         return d
 
 
-def build_rungs(symbol: str, quote: Quote, settings: Settings) -> list[Rung]:
+def build_rungs(
+    symbol: str,
+    settings: Settings,
+    anchors: Sequence[tuple[str, float]],
+) -> list[Rung]:
     """Every rung for one symbol, lowest price first.
 
     Ascending rather than the conventional high-at-top ladder: every rung at
@@ -121,11 +145,13 @@ def build_rungs(symbol: str, quote: Quote, settings: Settings) -> list[Rung]:
     actually rest and wait -- the ones being hunted for -- are the low ones.
     Those go first rather than at the end of a long list.
 
-    Returns ``[]`` when the broker has not reported a session range yet — a
-    ladder anchored on a zero high would place orders at absurd prices, so
-    "no anchor" must mean "no rungs" rather than "anchor at zero".
+    ``anchors`` is ``[(name, price), ...]`` — normally the two swing levels.
+    Anchors at or below zero are dropped rather than used: a ladder hung off a
+    zero anchor would place orders at absurd prices, so "no anchor" must mean
+    "no rungs".
     """
-    if not quote.has_day_range:
+    usable = [(name, price) for name, price in anchors if price and price > 0]
+    if not usable:
         return []
 
     step = settings.ladder_step_for(symbol)
@@ -133,10 +159,7 @@ def build_rungs(symbol: str, quote: Quote, settings: Settings) -> list[Rung]:
     levels = settings.ladder_levels
 
     rungs: dict[float, Rung] = {}
-    for anchor_name, anchor_price in (
-        (ANCHOR_HIGH, quote.day_high),
-        (ANCHOR_LOW, quote.day_low),
-    ):
+    for anchor_name, anchor_price in usable:
         # Snap the anchor onto the grid once, then step from there. Stepping
         # from a raw off-grid anchor and rounding each result independently
         # gives uneven spacing and duplicate prices.
@@ -163,12 +186,22 @@ def build_rungs(symbol: str, quote: Quote, settings: Settings) -> list[Rung]:
 
 
 def build_rung_views(
-    symbol: str, quote: Quote, settings: Settings
+    symbol: str,
+    settings: Settings,
+    anchors: Sequence[tuple[str, float]],
+    *,
+    reference_price: float = 0.0,
+    last_price: float = 0.0,
 ) -> list[RungView]:
-    """Rungs annotated with how each would behave against this quote."""
-    reference = quote.ask if quote.ask > 0 else quote.last
+    """Rungs annotated with how each would behave against the current market.
+
+    ``reference_price`` is the ask -- what a buy would actually pay -- so rungs
+    at or above it are marketable. Pass 0 when no quote is available; then
+    nothing is claimed about marketability rather than guessing at it.
+    """
+    reference = reference_price if reference_price > 0 else last_price
     out: list[RungView] = []
-    for r in build_rungs(symbol, quote, settings):
+    for r in build_rungs(symbol, settings, anchors):
         out.append(
             RungView(
                 symbol=r.symbol,
@@ -179,7 +212,7 @@ def build_rung_views(
                 # A buy limit at or above the ask crosses the spread and fills
                 # now; below it, the order rests.
                 marketable=bool(reference > 0 and r.price >= reference),
-                distance_from_last=(r.price - quote.last) if quote.last else 0.0,
+                distance_from_last=(r.price - last_price) if last_price else 0.0,
             )
         )
     return out

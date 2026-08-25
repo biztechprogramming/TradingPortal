@@ -10,6 +10,8 @@ from trading.audit import AuditLog
 from trading.config import Settings
 from trading.errors import OrderValidationError
 from trading.ladder import (
+    ANCHOR_HIGH_SINCE_LOW,
+    ANCHOR_LOW_SINCE_HIGH,
     ACTION_MODIFIED,
     ACTION_PLACED,
     ACTION_RESIZED,
@@ -44,12 +46,17 @@ def _quote(symbol="QQQ", bid=500.0, ask=500.04, last=500.02, high=502.0, low=498
     )
 
 
+def _anchors(high, low):
+    """The two swing levels the ladder hangs off."""
+    return [(ANCHOR_HIGH_SINCE_LOW, high), (ANCHOR_LOW_SINCE_HIGH, low)]
+
+
 # --- rung construction ------------------------------------------------------
 
 
 def test_rungs_span_both_anchors(tmp_path):
     s = _settings(tmp_path, ladder_levels=2)
-    rungs = build_rungs("QQQ", _quote(high=502.00, low=498.00), s)
+    rungs = build_rungs("QQQ", s, _anchors(502.00, 498.00))
     prices = [r.price for r in rungs]
 
     # 2 levels either side of each of two anchors, plus the anchors: 10 rungs.
@@ -62,14 +69,16 @@ def test_rungs_span_both_anchors(tmp_path):
 def test_psq_uses_sub_penny_step_without_penny_rounding(tmp_path):
     """PSQ's 0.005 step must survive; TICK_SIZE=0.01 must not collapse it."""
     s = _settings(tmp_path, ladder_levels=2)
-    rungs = build_rungs("PSQ", _quote("PSQ", 32.10, 32.12, 32.11, 32.20, 32.00), s)
+    rungs = build_rungs("PSQ", s, _anchors(32.20, 32.00))
     prices = sorted({r.price for r in rungs})
 
     assert s.ladder_step_for("PSQ") == 0.005
     assert 32.205 in prices, "sub-penny rung was rounded away"
     assert 32.195 in prices
     # Neighbouring rungs are exactly one half-cent apart, not one cent.
-    high_rungs = sorted(r.price for r in rungs if r.anchor == "HIGH")
+    high_rungs = sorted(
+        r.price for r in rungs if r.anchor == ANCHOR_HIGH_SINCE_LOW
+    )
     diffs = {round(b - a, 6) for a, b in zip(high_rungs, high_rungs[1:])}
     assert diffs == {0.005}
 
@@ -81,8 +90,8 @@ def test_off_grid_anchor_still_gives_evenly_spaced_rungs(tmp_path):
     497.85 both landing on 497.8) and drop levels.
     """
     s = _settings(tmp_path, ladder_levels=5)
-    rungs = [r for r in build_rungs("QQQ", _quote(high=502.50, low=497.75), s)
-             if r.anchor == "LOW"]
+    rungs = [r for r in build_rungs("QQQ", s, _anchors(502.50, 497.75))
+             if r.anchor == ANCHOR_LOW_SINCE_HIGH]
     prices = [r.price for r in rungs]
 
     assert len(prices) == 11, "every level must survive rounding"
@@ -108,24 +117,33 @@ def test_qqq_and_psq_get_different_steps(tmp_path):
     assert s.ladder_step_for("PSQ") == 0.005
 
 
-def test_no_rungs_without_a_session_range(tmp_path):
-    """A zero high must mean 'no anchor', never 'anchor at zero'."""
+def test_no_rungs_without_usable_anchors(tmp_path):
+    """A zero level must mean 'no anchor', never 'anchor at zero'."""
     s = _settings(tmp_path)
-    assert build_rungs("QQQ", _quote(high=0.0, low=0.0), s) == []
+    assert build_rungs("QQQ", s, _anchors(0.0, 0.0)) == []
+    assert build_rungs("QQQ", s, []) == []
+
+
+def test_one_usable_anchor_still_builds_its_side(tmp_path):
+    """Losing one level must not silently blank the whole ladder."""
+    s = _settings(tmp_path, ladder_levels=2)
+    rungs = build_rungs("QQQ", s, _anchors(502.00, 0.0))
+    assert len(rungs) == 5
+    assert {r.anchor for r in rungs} == {ANCHOR_HIGH_SINCE_LOW}
 
 
 def test_overlapping_anchors_do_not_duplicate_a_price(tmp_path):
     """A narrow session range makes the two ladders overlap."""
     s = _settings(tmp_path, ladder_levels=5)
-    rungs = build_rungs("QQQ", _quote(high=500.20, low=500.00), s)
+    rungs = build_rungs("QQQ", s, _anchors(500.20, 500.00))
     prices = [r.price for r in rungs]
     assert len(prices) == len(set(prices))
 
 
 def test_marketable_flag_marks_rungs_at_or_above_the_ask(tmp_path):
     s = _settings(tmp_path, ladder_levels=3)
-    views = build_rung_views("QQQ", _quote(bid=500.0, ask=500.04, high=500.10,
-                                           low=499.90), s)
+    views = build_rung_views("QQQ", s, _anchors(500.10, 499.90),
+                             reference_price=500.04, last_price=500.02)
     for v in views:
         assert v.marketable == (v.price >= 500.04)
     assert any(v.marketable for v in views)

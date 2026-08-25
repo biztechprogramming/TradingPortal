@@ -38,6 +38,7 @@ from .errors import (
     TradingError,
 )
 from .ladder import (
+    ANCHOR_NAMES,
     LadderExecutor,
     LadderOrderResult,
     build_rung_views,
@@ -259,6 +260,7 @@ class TradingService:
             f"{short_sym}_shares": total_short,
             "long_symbol": long_sym,
             "short_symbol": short_sym,
+            "chart_symbols": list(self.settings.chart_symbols),
             "long_shares": total_long,
             "short_shares": total_short,
             "cash_available": round(total_cash, 2),
@@ -428,6 +430,7 @@ class TradingService:
                 "tick": self.settings.ladder_tick_for(symbol),
                 "quote": None,
                 "rungs": [],
+                "anchors": [],
                 "error": None,
             }
             for broker in self.brokers.values():
@@ -482,30 +485,31 @@ class TradingService:
             entry["session"] = session.to_dict()
 
             quote = quotes.get(symbol)
-            if session.complete:
-                # Anchor rungs on the session range we just derived, which may
-                # be richer than the quote's own high/low.
-                anchor_quote = (
-                    replace(quote, day_high=session.day_high,
-                            day_low=session.day_low)
-                    if quote is not None
-                    else Quote(
-                        symbol=symbol,
-                        bid=0.0, ask=0.0,
-                        last=session.high_since_low or session.day_high,
-                        timestamp=time.time(),
-                        day_high=session.day_high,
-                        day_low=session.day_low,
-                    )
-                )
+            if session.has_swing_anchors:
+                # Rungs hang off the live swing -- high since the low, low
+                # since the high -- not off the day extremes, which can both
+                # be hours stale and on the wrong side of the current leg.
+                entry["anchors"] = [
+                    {"code": code, "name": ANCHOR_NAMES.get(code, code),
+                     "price": price}
+                    for code, price in session.anchors
+                ]
                 entry["rungs"] = [
                     r.to_dict()
-                    for r in build_rung_views(symbol, anchor_quote, self.settings)
+                    for r in build_rung_views(
+                        symbol,
+                        self.settings,
+                        session.anchors,
+                        reference_price=(quote.ask if quote else 0.0),
+                        last_price=(
+                            quote.last if quote else session.high_since_low
+                        ),
+                    )
                 ]
                 entry["error"] = None
             elif not entry["error"]:
                 entry["error"] = (
-                    f"no session high/low for {symbol} yet — neither the live "
+                    f"no swing levels for {symbol} yet — neither the live "
                     "quote nor the cached bars cover the current session, so "
                     "no rungs can be anchored"
                 )

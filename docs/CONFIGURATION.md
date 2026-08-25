@@ -183,6 +183,66 @@ documented inline there. The ones most worth a deliberate decision:
 
 ---
 
+## 7. Price ladder
+
+Rungs hang off the two **swing** levels — the high since the low of day
+(`HSL`) and the low since the high of day (`LSH`) — not off the day extremes.
+Whichever day extreme came second is one of the two anyway, so nothing current
+is lost, and the pair brackets the leg price is actually in.
+
+Every rung click needs a confirmation regardless of mode or
+`REQUIRE_CONFIRMATION`, and a rung already at the working price re-prices that
+order rather than adding a second one.
+
+| Variable | Default | Why you might change it |
+|---|---|---|
+| `LADDER_ENABLED` | true | Set false to hide the ladder entirely |
+| `LADDER_LEVELS` | 5 | Rungs either side of each anchor. Capped at 20 |
+| `LADDER_STEP_QQQ` | 0.10 | Rung spacing for the long symbol |
+| `LADDER_STEP_PSQ` | 0.005 | Rung spacing for the short symbol |
+| `LADDER_TICK_<SYM>` | min(step, `TICK_SIZE`) | The venue increment rungs snap to. Only set this if your venue's tick differs from a penny |
+| `LADDER_MAX_DEVIATION_PCT` | 10 | Fat-finger guard: refuses a rung this far from last |
+
+`LADDER_STEP_<SYMBOL>` follows whatever `LONG_SYMBOL`/`SHORT_SYMBOL` are set
+to, not a hard-coded QQQ/PSQ pair.
+
+---
+
+## 8. Charts and cached bars
+
+Ninety days of hourly extended-hours bars per symbol live in
+`var/state/candles.db`. A refresh re-fetches only the recent edge; closed bars
+are final. A separate, finer series times the session's extremes — an hourly
+bar can only say *which hour* a high happened in, which is not a time.
+
+| Variable | Default | Why you might change it |
+|---|---|---|
+| `CANDLE_DAYS` | 90 | How much history the chart holds |
+| `CANDLE_BAR_SIZE` | 1h | Bar size for the chart |
+| `CANDLE_OUTSIDE_RTH` | true | Include pre/post-market bars |
+| `CANDLE_REFRESH_HOURS` | 2 | How much of the recent edge is re-fetched |
+| `CANDLE_MAX_GAP_HOURS` | 80 | Must exceed 72 — a weekend is a legitimate ~65h hole |
+| `SESSION_BAR_SIZE` | 1min | The fine series used to time the extremes |
+| `SESSION_DAYS` | 2 | Days of the fine series kept; the rest is pruned |
+| `SESSION_REFRESH_SECONDS` | 45 | Floor between fine-series refreshes |
+| `QUOTE_DISPLAY_TTL_SECONDS` | 5 | Dashboard quote memo. Order pricing never uses it |
+| `REFERENCE_SYMBOLS` | NDX | Charted but **never** tradable — see below |
+
+`REFERENCE_SYMBOLS` is a comma-separated list charted alongside the traded
+pair, because QQQ and PSQ both track the Nasdaq-100 and the underlying is what
+explains their moves. They are deliberately kept out of the tradable
+allowlist: an order for one is rejected like any other unknown ticker, and
+startup refuses a reference symbol that shadows `LONG_SYMBOL` or
+`SHORT_SYMBOL`.
+
+Note that `NDX` is an index, so it is only computed during the regular
+session — its chart has no extended-hours bars even when `CANDLE_OUTSIDE_RTH`
+is on. Point `REFERENCE_SYMBOLS` at a Nasdaq-100 futures contract instead if
+you want overnight coverage; set `IBKR_CONID_<SYMBOL>` to pin the contract,
+since futures symbols are ambiguous across expiries.
+
+---
+
 ## Keeping secrets out of the wrong places
 
 - `.env` is git-ignored and excluded from the Docker build context.

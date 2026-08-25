@@ -62,14 +62,15 @@ def test_regular_hours_boundary_is_the_open_bell():
 # --- extremes and their timing ---------------------------------------------
 
 
-def test_reports_both_extremes_with_the_hour_each_happened():
+def test_reports_both_extremes_with_the_time_each_happened():
     bars = _session_bars([
         (5, 700.0, 702.0),
         (6, 698.0, 701.0),      # low of day
         (7, 699.0, 705.0),      # high of day
         (8, 703.0, 704.0),
     ])
-    out = compute_session_range("QQQ", bars, now=_now_et(9))
+    out = compute_session_range("QQQ", bars, now=_now_et(9),
+                                resolution_seconds=HOUR)
 
     assert out.complete
     assert out.day_high == 705.0
@@ -130,6 +131,35 @@ def test_since_windows_include_the_bar_that_set_the_extreme():
     bars = _session_bars([(6, 690.0, 699.0), (7, 692.0, 695.0)])
     out = compute_session_range("QQQ", bars, now=_now_et(9))
     assert out.high_since_low == 699.0
+
+
+def test_minute_bars_give_minute_exact_times():
+    """The reason the session series is finer than the chart series."""
+    day = _et(2026, 8, 25, 12).date()
+
+    def minute_bar(hour, minute, low, high):
+        ts = int(datetime(day.year, day.month, day.day, hour, minute,
+                          tzinfo=_EASTERN).timestamp())
+        return Bar("QQQ", ts, open=(low + high) / 2, high=high, low=low,
+                   close=(low + high) / 2, volume=10)
+
+    bars = [
+        minute_bar(9, 31, 700.0, 701.0),
+        minute_bar(9, 47, 699.0, 706.5),    # high of day, 09:47
+        minute_bar(10, 3, 695.25, 698.0),   # low of day, 10:03
+        minute_bar(10, 18, 696.0, 699.5),
+    ]
+    out = compute_session_range("QQQ", bars, now=_now_et(11),
+                                resolution_seconds=60)
+
+    high_et = datetime.fromtimestamp(out.day_high_at, timezone.utc).astimezone(_EASTERN)
+    low_et = datetime.fromtimestamp(out.day_low_at, timezone.utc).astimezone(_EASTERN)
+    assert (high_et.hour, high_et.minute) == (9, 47)
+    assert (low_et.hour, low_et.minute) == (10, 3)
+    assert out.resolution_seconds == 60
+    # The low came after the high, so the live leg is the bounce off the low.
+    assert out.low_came_first is False
+    assert out.high_since_low == 699.5
 
 
 # --- interaction with the live quote ---------------------------------------
@@ -194,7 +224,8 @@ def test_yesterdays_bars_are_excluded():
 
 def test_serialises_for_the_dashboard():
     bars = _session_bars([(5, 690.0, 695.0), (6, 700.0, 712.0)])
-    d = compute_session_range("QQQ", bars, now=_now_et(8)).to_dict()
+    d = compute_session_range("QQQ", bars, now=_now_et(8),
+                              resolution_seconds=HOUR).to_dict()
 
     for key in ("day_high", "day_high_at", "day_low", "day_low_at",
                 "high_since_low", "low_since_high", "low_came_first",

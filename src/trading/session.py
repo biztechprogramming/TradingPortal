@@ -1,6 +1,6 @@
 """Session extremes and the swings between them.
 
-Four figures, derived from the cached hourly bars for the current trading day:
+Four figures, derived from the cached bars for the current trading day:
 
 * the **high of day** and **when** it happened;
 * the **low of day** and **when** it happened;
@@ -11,10 +11,12 @@ The last two are what make the first two actionable. A high of day set at
 06:00 that has been fading ever since is a different market from one set five
 minutes ago, and the pair of "since" figures is what separates them.
 
-Resolution is the bar size, so with hourly bars a time means "during this
-hour", not a to-the-second print. That is stated in :attr:`SessionRange.
-resolution_seconds` rather than implied, because a timestamp that looks exact
-but is not would be worse than no timestamp at all.
+Resolution is the bar size of whatever series is passed in. The dashboard
+feeds this a minute series so the times are minute-exact; an hourly bar could
+only ever say *which hour* a high happened in, which is not a time. Whatever
+the series, :attr:`SessionRange.resolution_seconds` states it rather than
+leaving it implied, because a timestamp that looks exact but is not would be
+worse than no timestamp at all.
 """
 
 from __future__ import annotations
@@ -53,9 +55,11 @@ class SessionRange:
     low_since_high_at: int | None = None
     bars_used: int = 0
     session_start: int | None = None
-    resolution_seconds: int = 3600
+    #: Width of the bars these figures came from, in seconds. A time is exact
+    #: only to this granularity, and the dashboard says so.
+    resolution_seconds: int = 60
     #: "bars", "quote", or "bars+quote" when the live quote extended a bar
-    #: extreme within the still-forming hour.
+    #: extreme within the still-forming bar.
     source: str = ""
     note: str = ""
 
@@ -95,6 +99,18 @@ class SessionRange:
         }
 
 
+#: Bar-size strings the brokers accept, and their width in seconds.
+BAR_SECONDS: dict[str, int] = {
+    "1min": 60, "2min": 120, "3min": 180, "5min": 300, "10min": 600,
+    "15min": 900, "30min": 1800, "1h": 3600, "2h": 7200, "4h": 14400,
+    "8h": 28800, "1d": 86400,
+}
+
+
+def bar_seconds(bar_size: str, default: int = 60) -> int:
+    return BAR_SECONDS.get((bar_size or "").strip().lower(), default)
+
+
 def session_start_epoch(now: float, outside_rth: bool = True) -> int | None:
     """Epoch second at which the current trading day's session began.
 
@@ -121,13 +137,13 @@ def compute_session_range(
     now: float,
     quote: Quote | None = None,
     outside_rth: bool = True,
-    resolution_seconds: int = 3600,
+    resolution_seconds: int = 60,
 ) -> SessionRange:
     """Derive the session extremes and the swings between them.
 
     ``bars`` may span many days; only those in the current session are used.
     ``quote`` is optional and only ever *extends* what the bars already show —
-    the still-forming hour is not in a closed bar yet, so a live quote can
+    the most recent moments are not in a closed bar yet, so a live quote can
     legitimately print past the last bar's high or low.
     """
     result = SessionRange(
@@ -178,7 +194,7 @@ def compute_session_range(
             result.low_since_high, result.low_since_high_at = worst.low, worst.ts
 
         # The quote may also have extended the trailing swing inside the
-        # still-forming hour.
+        # still-forming bar.
         if quote is not None:
             if quote.day_high > result.high_since_low:
                 result.high_since_low = quote.day_high

@@ -393,3 +393,30 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 /* --- session structure -------------------------------------------------- */
 .session-kv .num { display: inline-flex; align-items: baseline; gap: 6px; }
 .session-at { font-size: 11.5px; font-variant-numeric: normal; }
+
+/* Extended-hours spans, shaded so their presence is visible at a glance. */
+.session-band { fill: #1b2129; }
+.candle-ext { opacity: .62; }
+.band-key {
+  display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  background: #1b2129; border: 1px solid var(--line); vertical-align: -1px;
+}
+
+/* --- expanded chart ----------------------------------------------------- */
+.expand-btn { margin-left: auto; font-size: 11px; padding: 3px 9px; }
+
+/* Only the expanded block is shown, filling the viewport. Deliberately an
+   overlay rather than the Fullscreen API: that API is blocked in some
+   embedded contexts, and this behaves identically everywhere. */
+.candles-host.has-expanded .candle-block:not(.candle-expanded) { display: none; }
+.candle-block.candle-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  margin: 0;
+  padding: 16px 20px 20px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+.candle-block.candle-expanded .candle-figure svg { height: calc(100vh - 150px); }
+.candle-block.candle-expanded .sub-head { margin-top: 0; border-top: 0; }

@@ -44,7 +44,7 @@ from .ladder import (
     rung_key,
 )
 from .locks import ExecutionLock
-from .session import compute_session_range
+from .session import bar_seconds, compute_session_range
 from .models import (
     BrokerResult,
     Quote,
@@ -77,6 +77,14 @@ class TradingService:
         self.nav = NavLedger(settings.state_dir / "nav_history.jsonl")
         self.candle_store = CandleStore(settings.state_dir / "candles.db")
         self.candles = CandleService(settings, self.candle_store)
+        #: Last fine-series refresh per symbol. The dashboard polls the ladder
+        #: every few seconds; without this each poll would make a broker round
+        #: trip per symbol just to re-read minute bars that have not changed.
+        self._session_refreshed: dict[str, float] = {}
+        #: Short-lived quote memo for the *display* paths only. See
+        #: :meth:`display_quote`.
+        self._quote_memo: dict[str, tuple[float, Any, str | None]] = {}
+        self._quote_memo_lock = threading.Lock()
         self.backfiller = Backfiller(settings, self.nav, self.audit)
         self._nav_recorded: dict[str, str] = {}
 
@@ -102,6 +110,37 @@ class TradingService:
             log.warning("%s", warning)
         return errors
 
+    def display_quote(self, broker: Broker, symbol: str) -> tuple[Any, str | None]:
+        """A quote for the dashboard, memoised for a few seconds.
+
+        NEVER use this to price an order. Execution calls the broker directly
+        through ``ExecutionEngine.fresh_quote``, which validates staleness
+        against ``MAX_QUOTE_AGE_SECONDS``; a memo would undermine exactly that
+        check. This exists only because the dashboard asks for the same quote
+        several times per poll, and because a *failing* snapshot costs several
+        seconds of retries inside the adapter -- repeated once per symbol per
+        broker per poll, that alone made the whole dashboard sluggish.
+
+        Returns ``(quote, error)``; exactly one is set.
+        """
+        key = f"{broker.name}:{symbol.upper()}"
+        ttl = self.settings.quote_display_ttl_seconds
+        now = time.time()
+        with self._quote_memo_lock:
+            cached = self._quote_memo.get(key)
+            if cached and now - cached[0] < ttl:
+                return cached[1], cached[2]
+        try:
+            quote = broker.get_quote(symbol)
+            entry = (time.time(), quote, None)
+        except Exception as exc:
+            # Failures are memoised too, and that is the point: a missing
+            # market-data subscription must not cost a retry storm per poll.
+            entry = (time.time(), None, str(exc))
+        with self._quote_memo_lock:
+            self._quote_memo[key] = entry
+        return entry[1], entry[2]
+
     # --- status -----------------------------------------------------------
 
     def snapshot_broker(self, broker: Broker) -> BrokerSnapshot:
@@ -126,10 +165,14 @@ class TradingService:
                 self.settings.short_symbol,
             )
             for symbol in self.settings.symbols:
-                try:
-                    snapshot.quotes[symbol] = broker.get_quote(symbol)
-                except Exception as exc:  # quotes are nice-to-have on a dashboard
-                    log.debug("%s quote for %s failed: %s", broker.name, symbol, exc)
+                quote, quote_error = self.display_quote(broker, symbol)
+                if quote is not None:
+                    snapshot.quotes[symbol] = quote
+                else:  # quotes are nice-to-have on a dashboard
+                    log.debug(
+                        "%s quote for %s failed: %s",
+                        broker.name, symbol, quote_error,
+                    )
             self._record_nav(broker, snapshot)
         except Exception as exc:
             snapshot.connected = False
@@ -391,25 +434,42 @@ class TradingService:
                 try:
                     if not broker.connected:
                         broker.connect()
-                    quote = broker.get_quote(symbol)
                 except Exception as exc:
                     entry["error"] = str(exc)
+                    continue
+                quote, quote_error = self.display_quote(broker, symbol)
+                if quote is None:
+                    entry["error"] = quote_error
                     continue
                 quotes[symbol] = quote
                 entry["quote"] = quote.to_dict()
                 entry["error"] = None
                 break
 
-            # Session extremes come from the cached bars, which carry the one
-            # thing a snapshot quote cannot: *when* each extreme happened.
-            # This also keeps the ladder anchored when the quote feed is
-            # unavailable but history still works.
+            # Session extremes come from a *minute* series, not the hourly
+            # one the chart uses: an hourly bar can only say which hour a high
+            # happened in, which is not a time. This also keeps the ladder
+            # anchored when the quote feed is down but history still works.
+            fine = self.settings.session_bar_size
+            bars = []
             try:
+                due = (
+                    time.time() - self._session_refreshed.get(symbol, 0.0)
+                    >= self.settings.session_refresh_seconds
+                )
+                if due:
+                    self.candles.refresh(
+                        list(self.brokers.values()), symbol,
+                        days=self.settings.session_days, bar_size=fine,
+                    )
+                    self._session_refreshed[symbol] = time.time()
                 bars = self.candle_store.bars(
-                    symbol, time.time() - 3 * 86400, time.time()
+                    symbol,
+                    time.time() - self.settings.session_days * 86400,
+                    time.time(),
+                    fine,
                 )
             except Exception as exc:
-                bars = []
                 log.debug("session bars for %s unavailable: %s", symbol, exc)
             session = compute_session_range(
                 symbol,
@@ -417,6 +477,7 @@ class TradingService:
                 now=time.time(),
                 quote=quotes.get(symbol),
                 outside_rth=self.settings.candle_outside_rth,
+                resolution_seconds=bar_seconds(fine),
             )
             entry["session"] = session.to_dict()
 

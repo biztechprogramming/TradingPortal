@@ -347,7 +347,8 @@ function renderLadder(ladder) {
     const ss = entry.session || {};
     const hhmm = (ts) => ts
       ? new Date(ts * 1000).toLocaleTimeString('en-US',
-          { hour: 'numeric', minute: '2-digit' })
+          { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+        + ' ET'
       : '—';
     const level = (label, value, at, extra = '') =>
       `<div class="kv session-kv">
@@ -367,7 +368,10 @@ function renderLadder(ladder) {
          ${level('Low since high', ss.low_since_high, ss.low_since_high_at,
              upLeg === false ? '<span class="pill pill-anchor">LEG</span>' : '')}
          <div class="sub-note">
-           ${ss.bars_used} hourly bar(s) this session — times are to the hour.
+           From ${ss.bars_used} bar(s) this session; times are exact to
+           ${ss.resolution_seconds >= 3600
+             ? `the ${ss.resolution_seconds / 3600}h`
+             : `${ss.resolution_seconds / 60} min`}.
            ${ss.note ? esc(ss.note) : ''}
          </div>`
       : `<div class="alert alert-warn">${esc(ss.note || 'no session data yet')}</div>`;
@@ -529,6 +533,26 @@ function reportLadderResult(symbol, price, tick, res) {
 // only re-fetches the recent edge, so changing range here is free -- it is a
 // slice of data already in the browser, not a new request.
 
+// Which US session a bar belongs to. Done in Eastern regardless of where the
+// browser is, because 09:30-16:00 is defined in Eastern, not locally.
+const ET_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+});
+
+function etMinutes(ts) {
+  const parts = ET_PARTS.formatToParts(new Date(ts * 1000));
+  const h = Number(parts.find((p) => p.type === 'hour').value);
+  const m = Number(parts.find((p) => p.type === 'minute').value);
+  return h * 60 + m;
+}
+
+const REGULAR_OPEN_MIN = 9 * 60 + 30;
+const REGULAR_CLOSE_MIN = 16 * 60;
+const isRegularSession = (ts) => {
+  const m = etMinutes(ts);
+  return m >= REGULAR_OPEN_MIN && m < REGULAR_CLOSE_MIN;
+};
+
 const RANGES = [
   { label: '1D', days: 1 },
   { label: '5D', days: 5 },
@@ -537,6 +561,7 @@ const RANGES = [
 ];
 let rangeDays = 5;
 let candleData = {};
+let expandedSymbol = null;
 
 function renderRangePicker() {
   $('range-picker').innerHTML = RANGES.map((r) =>
@@ -579,16 +604,38 @@ function renderCandles() {
     const err = (data.refresh?.errors || []).length
       ? `<div class="alert alert-warn">${data.refresh.errors.map(esc).join('<br>')}</div>`
       : '';
-    return `<div class="candle-block">
+    const isOpen = expandedSymbol === sym;
+    return `<div class="candle-block${isOpen ? ' candle-expanded' : ''}"
+        data-block="${esc(sym)}">
       <h3 class="sub-head">${esc(sym)}
-        <span class="muted">${(data.bars || []).length} bars cached</span></h3>
+        <span class="muted">${(data.bars || []).length} bars cached</span>
+        <button class="small expand-btn" data-expand="${esc(sym)}">
+          ${isOpen ? '✕ Close' : '⤢ Full screen'}</button>
+      </h3>
       ${err}
       ${candleChart(sym, data)}
     </div>`;
   }).join('');
   host.innerHTML = charts;
+  host.classList.toggle('has-expanded', expandedSymbol !== null);
+
+  for (const btn of host.querySelectorAll('.expand-btn')) {
+    btn.addEventListener('click', (e) => {
+      const sym = e.currentTarget.dataset.expand;
+      expandedSymbol = expandedSymbol === sym ? null : sym;
+      renderCandles();
+    });
+  }
   for (const sym of symbols) attachCandleCrosshair(sym);
 }
+
+// Esc leaves the expanded chart, which is what a full-screen view should do.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && expandedSymbol !== null) {
+    expandedSymbol = null;
+    renderCandles();
+  }
+});
 
 /** Candlestick SVG for one symbol over the selected range. */
 function candleChart(symbol, data) {
@@ -599,7 +646,10 @@ function candleChart(symbol, data) {
       + 'for this range yet.</div>';
   }
 
-  const W = 1000, H = 300;
+  // A taller viewBox when expanded: the SVG stretches to its container, so
+  // more height here buys real vertical resolution rather than a scale-up.
+  const isOpen = expandedSymbol === symbol;
+  const W = 1000, H = isOpen ? 560 : 300;
   const M = { top: 10, right: 58, bottom: 22, left: 8 };
   const plotW = W - M.left - M.right;
   const plotH = H - M.top - M.bottom;
@@ -613,7 +663,7 @@ function candleChart(symbol, data) {
   // leave real gaps overnight and at weekends; spacing by time would render
   // those as wide dead bands and squeeze the actual trading into slivers.
   const slot = plotW / bars.length;
-  const bodyW = Math.max(1, Math.min(9, slot * 0.7));
+  const bodyW = Math.max(1, Math.min(isOpen ? 16 : 9, slot * 0.7));
   const cx = (i) => M.left + slot * (i + 0.5);
   const py = (v) => M.top + plotH - ((v - lo) / (hi - lo)) * plotH;
 
@@ -626,17 +676,36 @@ function candleChart(symbol, data) {
         text-anchor="start">${value.toFixed(2)}</text>`;
   }).join('');
 
+  // Extended-hours bars are in the data but look identical to regular ones
+  // without this, which reads as "extended hours are missing".
+  const extended = bars.map((b) => !isRegularSession(b[0]));
+  const bands = [];
+  let runStart = null;
+  for (let i = 0; i <= bars.length; i++) {
+    if (i < bars.length && extended[i]) {
+      if (runStart === null) runStart = i;
+    } else if (runStart !== null) {
+      bands.push(`<rect class="session-band" x="${(M.left + slot * runStart).toFixed(2)}"
+        y="${M.top}" width="${(slot * (i - runStart)).toFixed(2)}"
+        height="${plotH}"/>`);
+      runStart = null;
+    }
+  }
+  const extendedCount = extended.filter(Boolean).length;
+
   const candles = bars.map((b, i) => {
     const [, o, h, l, c] = b;
     const up = c >= o;
-    const cls = up ? 'candle-up' : 'candle-down';
+    const cls = `${up ? 'candle-up' : 'candle-down'}${extended[i] ? ' candle-ext' : ''}`;
     const x = cx(i);
     const top = py(Math.max(o, c));
     const bottom = py(Math.min(o, c));
     const height = Math.max(1, bottom - top);
-    return `<line class="wick ${cls}" x1="${x.toFixed(2)}" y1="${py(h).toFixed(2)}"
+    return `<line class="wick ${cls}" vector-effect="non-scaling-stroke"
+        x1="${x.toFixed(2)}" y1="${py(h).toFixed(2)}"
         x2="${x.toFixed(2)}" y2="${py(l).toFixed(2)}"/>
-      <rect class="body ${cls}" x="${(x - bodyW / 2).toFixed(2)}" y="${top.toFixed(2)}"
+      <rect class="body ${cls}" vector-effect="non-scaling-stroke"
+        x="${(x - bodyW / 2).toFixed(2)}" y="${top.toFixed(2)}"
         width="${bodyW.toFixed(2)}" height="${height.toFixed(2)}"/>`;
   }).join('');
 
@@ -648,7 +717,7 @@ function candleChart(symbol, data) {
   return `<figure class="chart-figure candle-figure" data-symbol="${esc(symbol)}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
         aria-label="${esc(symbol)} hourly candles">
-      ${grid}${candles}
+      ${bands.join('')}${grid}${candles}
       <line class="crosshair candle-cross" y1="${M.top}" y2="${M.top + plotH}"
         style="display:none"/>
       <rect class="candle-hit" x="${M.left}" y="${M.top}" width="${plotW}"
@@ -656,7 +725,9 @@ function candleChart(symbol, data) {
     </svg>
     <div class="chart-tip candle-tip" style="display:none"></div>
     <figcaption class="muted">${esc(stamp(first))} → ${esc(stamp(last))}
-      · ${bars.length} hourly bars${data.outside_rth ? ' · extended hours' : ''}</figcaption>
+      · ${bars.length} × ${esc(data.bar_size || '1h')} bars
+      · <span class="band-key"></span> ${extendedCount} extended-hours
+      (${bars.length - extendedCount} regular session)</figcaption>
   </figure>`;
 }
 
@@ -672,7 +743,7 @@ function attachCandleCrosshair(symbol) {
   const cutoff = Date.now() / 1000 - rangeDays * 86400;
   const bars = (candleData[symbol]?.bars || []).filter((b) => b[0] >= cutoff);
   if (!bars.length) return;
-  const W = 1000, M = { left: 8, right: 58 };
+  const W = 1000, M = { left: 8, right: 58 };   // must match candleChart
   const plotW = W - M.left - M.right;
   const slot = plotW / bars.length;
 

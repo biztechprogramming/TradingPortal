@@ -622,8 +622,12 @@ class SchwabBroker(Broker):
         of their opening timestamp, which keeps them aligned with IBKR's
         hourly bars so the two can share one cache table.
         """
-        if bar_size != "1h":
+        # Schwab's minute bars are native; only the hourly series has to be
+        # built by aggregation, since frequencyType=minute tops out at 30.
+        native = {"1min": 1, "5min": 5, "10min": 10, "15min": 15, "30min": 30}
+        if bar_size not in native and bar_size != "1h":
             return None
+        frequency = native.get(bar_size, 30)
 
         resp = self._request(
             "GET",
@@ -632,13 +636,36 @@ class SchwabBroker(Broker):
                 "symbol": symbol.upper(),
                 "periodType": "day",
                 "frequencyType": "minute",
-                "frequency": 30,
+                "frequency": frequency,
                 "startDate": int(start * 1000),
                 "endDate": int(end * 1000),
                 "needExtendedHoursData": "true" if outside_rth else "false",
             },
         )
         body = resp.json() or {}
+
+        if bar_size != "1h":
+            out: list[Bar] = []
+            for candle in body.get("candles", []) or []:
+                stamp = candle.get("datetime")
+                if not stamp:
+                    continue
+                ts = int(float(stamp) / 1000.0)
+                if ts < start or ts > end:
+                    continue
+                try:
+                    out.append(Bar(
+                        symbol=symbol.upper(), ts=ts,
+                        open=float(candle.get("open", 0) or 0),
+                        high=float(candle.get("high", 0) or 0),
+                        low=float(candle.get("low", 0) or 0),
+                        close=float(candle.get("close", 0) or 0),
+                        volume=float(candle.get("volume", 0) or 0),
+                    ))
+                except (TypeError, ValueError):
+                    continue
+            out.sort(key=lambda b: b.ts)
+            return out
 
         buckets: dict[int, list[dict[str, Any]]] = {}
         for candle in body.get("candles", []) or []:

@@ -169,6 +169,19 @@ class Settings:
     #: A weekend is a legitimate ~65h hole in an extended-hours hourly series,
     #: so anything at or below that must not be mistaken for missing data.
     candle_max_gap_hours: float = 80.0
+    #: A second, finer series used only to time the session's extremes. The
+    #: chart stays on ``candle_bar_size``; an hourly bar can only say which
+    #: hour a high happened in, which is not a time.
+    session_bar_size: str = "1min"
+    #: Days of the fine series to keep. Two covers the previous session, so
+    #: the figures on screen before the open are still last session's.
+    session_days: int = 2
+    #: Minimum gap between fine-series refreshes. The dashboard polls the
+    #: ladder far more often than a minute bar can change.
+    session_refresh_seconds: float = 45.0
+    #: How long the dashboard may reuse a quote it already fetched. Display
+    #: only -- order pricing always re-reads from the broker.
+    quote_display_ttl_seconds: float = 5.0
 
     # --- order monitoring -------------------------------------------------
     order_fill_timeout_seconds: float = 90.0
@@ -299,6 +312,9 @@ class Settings:
             "candle_bar_size": self.candle_bar_size,
             "candle_outside_rth": self.candle_outside_rth,
             "candle_refresh_hours": self.candle_refresh_hours,
+            "session_bar_size": self.session_bar_size,
+            "session_days": self.session_days,
+            "session_refresh_seconds": self.session_refresh_seconds,
             "schwab_logins": list(self.schwab_logins),
             "trading_accounts_restricted": bool(self.trading_accounts),
             "trading_accounts_count": len(self.trading_accounts),
@@ -452,6 +468,10 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         candle_outside_rth=_bool("CANDLE_OUTSIDE_RTH", True),
         candle_refresh_hours=_float("CANDLE_REFRESH_HOURS", 2.0),
         candle_max_gap_hours=_float("CANDLE_MAX_GAP_HOURS", 80.0),
+        session_bar_size=_env("SESSION_BAR_SIZE", "1min") or "1min",
+        session_days=_int("SESSION_DAYS", 2),
+        session_refresh_seconds=_float("SESSION_REFRESH_SECONDS", 45.0),
+        quote_display_ttl_seconds=_float("QUOTE_DISPLAY_TTL_SECONDS", 5.0),
         market_hours_guard=_bool("MARKET_HOURS_GUARD", True),
         allow_outside_rth=_bool("ALLOW_OUTSIDE_RTH", False),
         http_timeout_seconds=_float("HTTP_TIMEOUT_SECONDS", 15.0),
@@ -517,6 +537,12 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("CANDLE_DAYS must be >= 1")
     if s.candle_refresh_hours <= 0:
         raise ConfigError("CANDLE_REFRESH_HOURS must be > 0")
+    if s.session_refresh_seconds < 0:
+        raise ConfigError("SESSION_REFRESH_SECONDS must be >= 0")
+    if s.session_days < 1:
+        raise ConfigError("SESSION_DAYS must be >= 1")
+    if not s.session_bar_size:
+        raise ConfigError("SESSION_BAR_SIZE must be set")
     if s.candle_max_gap_hours <= 72:
         raise ConfigError(
             "CANDLE_MAX_GAP_HOURS must exceed 72; a weekend is a legitimate "

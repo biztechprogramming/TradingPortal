@@ -25,8 +25,10 @@ retired TD Ameritrade API is not used anywhere in this project.
 4. **Callback URL:** `https://127.0.0.1:8182/`
    - Must be `https`, and must match `SCHWAB_CALLBACK_URL` exactly, trailing
      slash included.
-   - Nothing needs to listen on that port. The browser will fail to load the
-     page and that is fine — you copy the URL out of the address bar.
+   - `schwab-login` listens on that port for the few seconds the login
+     takes, catches the redirect and reads the code itself. If it cannot
+     bind the port it says so and falls back to asking you to copy the URL
+     out of the address bar.
 5. Submit and wait for approval. This is **not** instant; approval has
    historically taken from a few days to a couple of weeks. The app must show
    **Ready For Use** before the API will authenticate.
@@ -155,12 +157,35 @@ For each:
 2. **Tick only the accounts this program should reach.** This is your one
    chance to scope it — there is no read-only option, so any account you tick
    can be traded. Unticked accounts stay invisible to the app.
-3. Approve. The browser redirects to `https://127.0.0.1:8182/?code=…` and shows
-   an error page. That is expected.
-4. **Copy the entire URL from the address bar** and paste it at the prompt.
+3. Approve. The browser lands on `https://127.0.0.1:8182/?code=…`, which the
+   command is listening on, and shows "Authorisation received". Nothing to
+   copy.
+
+The certificate is self-signed, so the browser warns the first time. Choose
+*Advanced* → *Proceed*; it is your own machine, and the certificate is reused
+from `var/state/` so the warning does not return.
 
 The command then prints the accounts that login authorised and marks each
 `tradable` or `read-only` per your `TRADING_ACCOUNTS` setting.
+
+### If the redirect cannot be caught
+
+Pass `--no-listener`, or let it fall back on its own (port in use, no
+`openssl`, browser on a different machine). You then copy the entire redirected
+URL out of the address bar and paste it at the prompt.
+
+Be quick about it. **Schwab's authorisation codes expire in roughly thirty
+seconds**, timed from the moment you approve, and they work exactly once. A
+slow paste produces:
+
+```
+invalid_grant: "Authorization code is invalid, expired or revoked"
+```
+
+which means only that the clock beat you — nothing is misconfigured. Log in to
+schwab.com *first* so the timed window holds nothing but the checkboxes and the
+Approve button, then paste without stopping to read. Every retry needs a fresh
+trip through the authorise URL; a redirect URL cannot be reused.
 
 Tokens are written with mode `0600`.
 
@@ -229,7 +254,9 @@ you never handle those.
   120/min). A client-side sliding window holds us to 100/min; `429` responses
   honour `Retry-After`.
 - **Balances.** For `MARGIN` accounts the adapter reads
-  `availableFundsNonMarginableTrade` — the amount spendable *without borrowing*.
+  `buyingPowerNonMarginableTrade`, capped at `cashBalance` — the amount
+  spendable *without borrowing*. Not `availableFundsNonMarginableTrade`,
+  which Schwab zeroes once the account holds marginable stock.
   For `CASH` accounts it reads `cashAvailableForTrading`.
 - **Quote freshness** comes from `quoteTime`. If Schwab omits it, the quote is
   rejected rather than treated as current.
@@ -260,6 +287,8 @@ you never handle those.
 | Symptom | Cause and fix |
 |---|---|
 | `invalid_client` on login | App is not yet **Ready For Use**, or key/secret mismatch. |
+| `invalid_grant` on login | The code expired (~30s) or was already used. Re-run and open the **new** authorise URL; an old redirect URL will never work. |
+| Browser warns about the certificate | Expected — it is self-signed, from `var/state/oauth_cert_*.pem`. Proceed once per browser. |
 | Token refresh 400 after a week | Expected — re-run `schwab-login --login <label>`. |
 | One login works, the other 401s | Two logins sharing a token file. Give each its own; the defaults already do. |
 | An account is missing | It was not ticked during consent. Re-run `schwab-login` for its login. |

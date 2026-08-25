@@ -63,7 +63,8 @@ days to a couple of weeks — so start this first.
    quotes, and this system refuses to trade without a fresh quote, so every
    command aborts.
 4. Callback URL: `https://127.0.0.1:8182/` — must match `SCHWAB_CALLBACK_URL`
-   exactly, trailing slash included. Nothing needs to listen there.
+   exactly, trailing slash included. `schwab-login` listens there itself for
+   the duration of the login.
 5. Wait for the app to show **Ready For Use**.
 6. Copy the App Key and App Secret.
 

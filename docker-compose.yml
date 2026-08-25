@@ -3,11 +3,15 @@
 #   cp .env.example .env && chmod 600 .env
 #   docker compose build
 #   docker compose run --rm -it app schwab-login --login personal
-#   docker compose up -d
+#   docker compose up -d                      # gateway only -- see below
 #   docker compose run --rm app accounts
 #
-# The IBKR gateway is NOT started by default; see the `ibkr` profile at the
-# bottom and docs/DOCKER.md for the two ways to connect one.
+# `docker compose up -d` starts ONLY the ibeam gateway. The long-running app
+# service sits behind the `app` profile so that it is never started by
+# accident; one-shot `docker compose run --rm app ...` commands still work
+# without any flag. To run the daemon:
+#
+#   docker compose --profile app up -d
 
 services:
   app:
@@ -16,6 +20,13 @@ services:
       dockerfile: Dockerfile
     image: qqq-switch:latest
     container_name: qqq-switch
+
+    # Opt-in only: a bare `docker compose up -d` brings up the gateway and
+    # nothing else. `docker compose run --rm app <cmd>` auto-enables this
+    # profile, so the one-shot CLI commands need no extra flag. Start the
+    # daemon deliberately with `docker compose --profile app up -d`.
+    profiles:
+      - app
 
     # Credentials come from .env at runtime and are never baked into the image.
     # Marked optional so a fresh clone can still `compose config` and start in
@@ -32,9 +43,14 @@ services:
       API_HOST: 0.0.0.0
       LOG_DIR: /app/var/log
       STATE_DIR: /app/var/state
-      # Reaching a Client Portal Gateway running on the HOST. Override to
-      # https://ibeam:5000/v1/api when using the bundled gateway profile.
-      IBKR_BASE_URL: ${IBKR_BASE_URL:-https://host.docker.internal:5000/v1/api}
+      # The bundled `ibeam` service below is reached by service name over the
+      # compose network. NOTE: this deliberately does NOT interpolate
+      # ${IBKR_BASE_URL}, because .env sets that to https://localhost:5000 for
+      # running the CLI on the host -- and "localhost" inside this container is
+      # the container itself, not the gateway. Set IBKR_BASE_URL_CONTAINER to
+      # override (e.g. https://host.docker.internal:5000/v1/api when you run
+      # the gateway on the host instead of the ibeam service).
+      IBKR_BASE_URL: ${IBKR_BASE_URL_CONTAINER:-https://ibeam:5000/v1/api}
 
     # Published to loopback only. Change this and anyone who can reach the
     # host on this port, with the token, can trade your accounts.
@@ -74,9 +90,11 @@ services:
         max-file: "5"
 
   # ---------------------------------------------------------------------
-  # Optional: IBKR Client Portal Gateway, kept alive headlessly by IBeam.
+  # IBKR Client Portal Gateway, kept alive headlessly by IBeam.
   #
-  #   docker compose --profile ibkr up -d
+  # Started by a bare `docker compose up -d`; the app service is not. If you
+  # run the gateway on your host instead, comment this service out — two
+  # gateways on one IBKR login fight over the session and log each other out.
   #
   # READ THIS FIRST. IBeam works by injecting your IBKR username and
   # password into the gateway's login page, so those credentials sit in
@@ -89,12 +107,10 @@ services:
   ibeam:
     image: voyz/ibeam:latest
     container_name: qqq-ibeam
-    profiles: ["ibkr"]
     environment:
-      # Set both in .env before enabling this profile. Deliberately NOT
-      # declared with compose's `:?` required form: that is interpolated even
-      # when the profile is disabled, which would break every command for
-      # anyone running the gateway on the host instead.
+      # Set both in .env. Deliberately NOT declared with compose's `:?`
+      # required form, so that every other compose command still works for
+      # anyone who has commented this service out.
       IBEAM_ACCOUNT: ${IBEAM_ACCOUNT:-}
       IBEAM_PASSWORD: ${IBEAM_PASSWORD:-}
       IBEAM_GATEWAY_STARTUP: 30

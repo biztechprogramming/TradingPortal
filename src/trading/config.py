@@ -16,6 +16,14 @@ from typing import Any
 from .errors import ConfigError
 from .models import TradingMode
 
+#: Default ladder rung spacing per symbol, in dollars. QQQ moves far more per
+#: unit of time than PSQ, so the two ladders are deliberately not the same
+#: width. Override either with ``LADDER_STEP_<SYMBOL>``.
+DEFAULT_LADDER_STEPS: dict[str, float] = {"QQQ": 0.10, "PSQ": 0.005}
+
+#: Fallback spacing for a symbol with no entry above and no explicit override.
+FALLBACK_LADDER_STEP = 0.01
+
 #: Substrings that mark an environment variable as secret. Used by the
 #: redactor so a future variable named ``*_TOKEN`` is protected by default.
 SECRET_MARKERS = (
@@ -138,6 +146,30 @@ class Settings:
     max_quote_age_seconds: float = 10.0
     tick_size: float = 0.01
 
+    # --- ladder -----------------------------------------------------------
+    #: Rungs are placed at HIGH/LOW of day plus or minus N steps. Each rung is
+    #: a plain resting BUY limit order at exactly that price.
+    ladder_enabled: bool = True
+    ladder_levels: int = 5
+    ladder_steps: dict[str, float] = field(default_factory=dict)
+    ladder_ticks: dict[str, float] = field(default_factory=dict)
+    #: Fat-finger guard: a rung price further than this from the last trade is
+    #: refused, so a stale page or a mistyped API call cannot place an order at
+    #: an absurd price.
+    ladder_max_deviation_pct: float = 10.0
+
+    # --- candles ----------------------------------------------------------
+    #: Hourly extended-hours history, cached in SQLite. Only the most recent
+    #: ``candle_refresh_hours`` is re-fetched on a refresh; older bars are
+    #: final and are served from the cache.
+    candle_days: int = 90
+    candle_bar_size: str = "1h"
+    candle_outside_rth: bool = True
+    candle_refresh_hours: float = 2.0
+    #: A weekend is a legitimate ~65h hole in an extended-hours hourly series,
+    #: so anything at or below that must not be mistaken for missing data.
+    candle_max_gap_hours: float = 80.0
+
     # --- order monitoring -------------------------------------------------
     order_fill_timeout_seconds: float = 90.0
     order_poll_interval_seconds: float = 1.0
@@ -179,6 +211,28 @@ class Settings:
 
     def slippage_bps(self, side: str) -> float:
         return self.buy_slippage_bps if side == "BUY" else self.sell_slippage_bps
+
+    def ladder_step_for(self, symbol: str) -> float:
+        """Rung spacing for one symbol, in dollars."""
+        sym = (symbol or "").upper()
+        if sym in self.ladder_steps:
+            return self.ladder_steps[sym]
+        return DEFAULT_LADDER_STEPS.get(sym, FALLBACK_LADDER_STEP)
+
+    def ladder_tick_for(self, symbol: str) -> float:
+        """Smallest price increment a rung may land on.
+
+        This is about *tradability*, not spacing: it is the grid the venue
+        accepts, which the ladder step then walks across. Defaulting it to the
+        step would be wrong -- QQQ steps by 0.10, and snapping to a 0.10 grid
+        would throw away a session low of 497.75. So the default is the
+        ordinary tick, narrowed only when the step is finer than it (PSQ's
+        0.005).
+        """
+        sym = (symbol or "").upper()
+        if sym in self.ladder_ticks:
+            return self.ladder_ticks[sym]
+        return min(self.ladder_step_for(sym), self.tick_size)
 
     def schwab_token_path_for(self, login: str) -> Path:
         """Token file for one Schwab login. Never shared between logins."""
@@ -232,6 +286,19 @@ class Settings:
             "market_hours_guard": self.market_hours_guard,
             "allow_outside_rth": self.allow_outside_rth,
             "max_daily_commands": self.max_daily_commands,
+            "ladder_enabled": self.ladder_enabled,
+            "ladder_levels": self.ladder_levels,
+            "ladder_steps": {
+                sym: self.ladder_step_for(sym) for sym in self.symbols
+            },
+            "ladder_ticks": {
+                sym: self.ladder_tick_for(sym) for sym in self.symbols
+            },
+            "ladder_max_deviation_pct": self.ladder_max_deviation_pct,
+            "candle_days": self.candle_days,
+            "candle_bar_size": self.candle_bar_size,
+            "candle_outside_rth": self.candle_outside_rth,
+            "candle_refresh_hours": self.candle_refresh_hours,
             "schwab_logins": list(self.schwab_logins),
             "trading_accounts_restricted": bool(self.trading_accounts),
             "trading_accounts_count": len(self.trading_accounts),
@@ -304,6 +371,20 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         Path(token_path_env) if token_path_env else state_dir / "schwab_token.json"
     )
 
+    # Ladder spacing is per symbol, keyed on whatever LONG_SYMBOL/SHORT_SYMBOL
+    # are actually set to rather than a hard-coded QQQ/PSQ pair.
+    long_sym = (_env("LONG_SYMBOL", "QQQ") or "QQQ").upper()
+    short_sym = (_env("SHORT_SYMBOL", "PSQ") or "PSQ").upper()
+    ladder_steps: dict[str, float] = {}
+    ladder_ticks: dict[str, float] = {}
+    for sym in (long_sym, short_sym):
+        step_raw = _env(f"LADDER_STEP_{sym}")
+        if step_raw is not None:
+            ladder_steps[sym] = _float(f"LADDER_STEP_{sym}", 0.0)
+        tick_raw = _env(f"LADDER_TICK_{sym}")
+        if tick_raw is not None:
+            ladder_ticks[sym] = _float(f"LADDER_TICK_{sym}", 0.0)
+
     trading_accounts = _csv("TRADING_ACCOUNTS")
     # Back-compat: the original single-account variable still pins Schwab.
     legacy_schwab = _env("SCHWAB_ACCOUNT_NUMBER")
@@ -361,6 +442,16 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         ),
         require_mismatch_ack=_bool("REQUIRE_MISMATCH_ACK", True),
         max_daily_commands=_int("MAX_DAILY_COMMANDS", 50),
+        ladder_enabled=_bool("LADDER_ENABLED", True),
+        ladder_levels=_int("LADDER_LEVELS", 5),
+        ladder_steps=ladder_steps,
+        ladder_ticks=ladder_ticks,
+        ladder_max_deviation_pct=_float("LADDER_MAX_DEVIATION_PCT", 10.0),
+        candle_days=_int("CANDLE_DAYS", 90),
+        candle_bar_size=_env("CANDLE_BAR_SIZE", "1h") or "1h",
+        candle_outside_rth=_bool("CANDLE_OUTSIDE_RTH", True),
+        candle_refresh_hours=_float("CANDLE_REFRESH_HOURS", 2.0),
+        candle_max_gap_hours=_float("CANDLE_MAX_GAP_HOURS", 80.0),
         market_hours_guard=_bool("MARKET_HOURS_GUARD", True),
         allow_outside_rth=_bool("ALLOW_OUTSIDE_RTH", False),
         http_timeout_seconds=_float("HTTP_TIMEOUT_SECONDS", 15.0),
@@ -408,6 +499,30 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("MAX_REPRICE_ATTEMPTS must be >= 0")
     if not s.brokers_enabled:
         raise ConfigError("BROKERS_ENABLED must list at least one broker")
+    if s.ladder_levels < 1:
+        raise ConfigError("LADDER_LEVELS must be >= 1")
+    if s.ladder_levels > 20:
+        raise ConfigError(
+            "LADDER_LEVELS above 20 is refused; each rung is a one-click live "
+            "order and a wall of them is a fat-finger hazard, not a feature."
+        )
+    for sym in s.symbols:
+        if s.ladder_step_for(sym) <= 0:
+            raise ConfigError(f"LADDER_STEP_{sym} must be > 0")
+        if s.ladder_tick_for(sym) <= 0:
+            raise ConfigError(f"LADDER_TICK_{sym} must be > 0")
+    if s.ladder_max_deviation_pct <= 0:
+        raise ConfigError("LADDER_MAX_DEVIATION_PCT must be > 0")
+    if s.candle_days < 1:
+        raise ConfigError("CANDLE_DAYS must be >= 1")
+    if s.candle_refresh_hours <= 0:
+        raise ConfigError("CANDLE_REFRESH_HOURS must be > 0")
+    if s.candle_max_gap_hours <= 72:
+        raise ConfigError(
+            "CANDLE_MAX_GAP_HOURS must exceed 72; a weekend is a legitimate "
+            "~65 hour hole in an extended-hours hourly series and must not be "
+            "treated as missing data."
+        )
     if s.mode is TradingMode.LIVE and not s.api_token:
         raise ConfigError(
             "API_TOKEN must be set explicitly before live trading; an "

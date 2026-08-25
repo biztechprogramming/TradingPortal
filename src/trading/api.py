@@ -7,8 +7,10 @@ page in your browser cannot.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -36,6 +38,10 @@ log = logging.getLogger("trading.api")
 
 WEB_DIR = Path(__file__).parent / "web"
 
+#: Changes on every restart, so the dashboard reloads after a server-side
+#: (Python) change too, not only when a static asset is edited.
+STARTED_AT = time.time()
+
 
 class CommandRequest(BaseModel):
     command: str = Field(..., description="GO_LONG | GO_SHORT | GO_FLAT")
@@ -56,6 +62,35 @@ class CommandRequest(BaseModel):
 
 class AcknowledgeRequest(BaseModel):
     note: str = ""
+
+
+class LadderOrderRequest(BaseModel):
+    symbol: str = Field(..., description="Traded symbol, e.g. QQQ or PSQ")
+    limit_price: float = Field(..., gt=0, description="Exact rung price to buy at")
+    request_id: str | None = Field(
+        None, description="Client-supplied idempotency key"
+    )
+    confirm_token: str | None = Field(
+        None, description="Token returned by the confirmation-required response"
+    )
+    force: bool = Field(False, description="Bypass the duplicate-rung window")
+
+
+#: Static assets are read from disk on every request, so editing app.js or
+#: styles.css takes effect without restarting the server. This fingerprint
+#: lets the open dashboard notice that and reload itself.
+def _asset_version() -> str:
+    digest = hashlib.sha256()
+    for name in sorted(("index.html", "app.js", "styles.css")):
+        digest.update(name.encode())
+        try:
+            # Hashed by content, not mtime: a touch, a git checkout or an
+            # editor saving an unchanged file must not reload the dashboard
+            # out from under someone mid-click.
+            digest.update((WEB_DIR / name).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()[:16]
 
 
 def create_app(
@@ -112,10 +147,14 @@ def create_app(
 
     # --- dashboard --------------------------------------------------------
 
+    # Never cached: the dashboard polls /api/version and reloads when these
+    # change, which only works if the reload actually refetches them.
+    NO_STORE = {"Cache-Control": "no-store, must-revalidate"}
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard() -> HTMLResponse:
         html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
-        return HTMLResponse(html)
+        return HTMLResponse(html, headers=NO_STORE)
 
     @app.get("/app.js", include_in_schema=False)
     def app_js() -> Any:
@@ -124,6 +163,7 @@ def create_app(
         return Response(
             (WEB_DIR / "app.js").read_text(encoding="utf-8"),
             media_type="application/javascript",
+            headers=NO_STORE,
         )
 
     @app.get("/styles.css", include_in_schema=False)
@@ -133,7 +173,18 @@ def create_app(
         return Response(
             (WEB_DIR / "styles.css").read_text(encoding="utf-8"),
             media_type="text/css",
+            headers=NO_STORE,
         )
+
+    @app.get("/api/version")
+    def version() -> dict[str, Any]:
+        """Fingerprint of the dashboard assets.
+
+        Unauthenticated on purpose, like ``/api/health``: it exposes nothing
+        about the account, and the dashboard must be able to poll it even
+        while the token prompt is up.
+        """
+        return {"assets": _asset_version(), "server_started_at": STARTED_AT}
 
     # --- read-only --------------------------------------------------------
 
@@ -279,6 +330,84 @@ def create_app(
     def post_flat(payload: CommandRequest | None = None) -> JSONResponse:
         return _run(_alias(payload, "GO_FLAT"), source="shortcut")
 
+    @app.get("/api/candles", dependencies=[Auth])
+    def get_candles(
+        symbol: str = Query(..., description="Traded symbol, e.g. QQQ"),
+        days: int = Query(0, ge=0, le=365, description="0 uses CANDLE_DAYS"),
+        refresh: bool = Query(True),
+    ) -> dict[str, Any]:
+        sym = symbol.upper().strip()
+        if sym not in {x.upper() for x in settings.symbols}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"symbol {symbol!r} is not tracked; only "
+                       f"{sorted(settings.symbols)} are available",
+            )
+        return service.candle_series(sym, days=days or None, refresh=refresh)
+
+    @app.get("/api/ladder", dependencies=[Auth])
+    def get_ladder() -> dict[str, Any]:
+        return service.ladder()
+
+    @app.post("/api/ladder/order", dependencies=[Auth])
+    def post_ladder_order(payload: LadderOrderRequest) -> JSONResponse:
+        try:
+            result = service.place_ladder_order(
+                payload.symbol,
+                payload.limit_price,
+                request_id=payload.request_id,
+                confirm_token=payload.confirm_token,
+                force=payload.force,
+                source="dashboard",
+            )
+        except ConfirmationRequired as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "CONFIRMATION_REQUIRED",
+                    "detail": str(exc),
+                    "confirm_token": exc.token,
+                    "expires_at": exc.expires_at,
+                    "symbol": payload.symbol.upper(),
+                    "limit_price": payload.limit_price,
+                },
+            )
+        except DuplicateCommand as exc:
+            return JSONResponse(
+                status_code=409,
+                content={"status": "DUPLICATE", "detail": str(exc)},
+            )
+        except ExecutionLocked as exc:
+            return JSONResponse(
+                status_code=423,
+                content={"status": "LOCKED", "detail": str(exc)},
+            )
+        except UnreconciledState as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "NEEDS_ACKNOWLEDGEMENT",
+                    "detail": str(exc),
+                    "mismatch": service.state.data.mismatch,
+                },
+            )
+        except (MarketClosed, SafetyLimitExceeded) as exc:
+            return JSONResponse(
+                status_code=409,
+                content={"status": "BLOCKED", "detail": str(exc)},
+            )
+        except TradingError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "ERROR", "detail": str(exc)},
+            )
+
+        body = result.to_dict()
+        http_status = (
+            200 if result.status == "OK" else 207 if result.any_ok else 502
+        )
+        return JSONResponse(status_code=http_status, content=body)
+
     @app.post("/api/acknowledge", dependencies=[Auth])
     def acknowledge(payload: AcknowledgeRequest) -> dict[str, Any]:
         cleared = service.acknowledge_mismatch(payload.note)
@@ -297,6 +426,15 @@ def _alias(payload: CommandRequest | None, command: str) -> CommandRequest:
     data = payload.model_dump()
     data["command"] = command
     return CommandRequest(**data)
+
+
+def app_factory() -> FastAPI:  # pragma: no cover - uvicorn entry point
+    """Build the app from the environment.
+
+    Uvicorn's reloader re-imports the application in a fresh worker process,
+    so it needs an import string rather than an object. This is that target.
+    """
+    return create_app(load_settings())
 
 
 def run() -> None:  # pragma: no cover - entry point

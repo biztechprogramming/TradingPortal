@@ -31,6 +31,7 @@ from ..errors import (
 )
 from ..models import (
     Account,
+    Bar,
     Balances,
     Order,
     OrderState,
@@ -115,14 +116,19 @@ class SimulatedBroker(Broker):
         long_sym, short_sym = self.settings.symbols
         return {
             long_sym: Quote(long_sym, 500.00, 500.04, 500.02, now, 800, 900,
-                            source="simulated"),
+                            source="simulated",
+                            day_high=502.50, day_low=497.75),
             short_sym: Quote(short_sym, 32.10, 32.12, 32.11, now, 4000, 3800,
-                             source="simulated"),
+                             source="simulated",
+                             day_high=32.28, day_low=31.95),
         }
 
     def set_quote(self, symbol: str, bid: float, ask: float,
                   last: float | None = None, *, age: float = 0.0,
-                  halted: bool = False, delayed: bool = False) -> None:
+                  halted: bool = False, delayed: bool = False,
+                  day_high: float | None = None,
+                  day_low: float | None = None) -> None:
+        mid = (bid + ask) / 2
         self._quote_age[symbol.upper()] = age
         self._quotes[symbol.upper()] = Quote(
             symbol=symbol.upper(),
@@ -132,6 +138,8 @@ class SimulatedBroker(Broker):
             timestamp=time.time() - age,
             bid_size=1000,
             ask_size=1000,
+            day_high=day_high if day_high is not None else round(mid * 1.005, 4),
+            day_low=day_low if day_low is not None else round(mid * 0.995, 4),
             halted=halted,
             delayed=delayed,
             source="simulated",
@@ -391,6 +399,8 @@ class SimulatedBroker(Broker):
                 delayed=q.delayed,
                 halted=q.halted,
                 source=q.source,
+                day_high=round(max(q.day_high, q.last + d), 4),
+                day_low=round(min(q.day_low, q.last + d), 4) if q.day_low else 0.0,
             )
 
 
@@ -437,8 +447,32 @@ class ShadowBroker(Broker):
 
     def get_quote(self, symbol: str) -> Quote:
         quote = self.real.get_quote(symbol)
-        self._sim.set_quote(symbol, quote.bid, quote.ask, quote.last)
+        # Carry the session range across too, or the simulator's copy of the
+        # quote would report no high/low and the ladder would lose its anchors
+        # in dry run.
+        self._sim.set_quote(
+            symbol, quote.bid, quote.ask, quote.last,
+            day_high=quote.day_high, day_low=quote.day_low,
+        )
         return quote
+
+    def get_price_bars(
+        self,
+        symbol: str,
+        start: float,
+        end: float,
+        *,
+        bar_size: str = "1h",
+        outside_rth: bool = True,
+    ) -> list[Bar] | None:
+        """Historical bars are pure market data, so they come from the real API.
+
+        Without this the base class's "unsupported" default would apply and a
+        dry run would silently show an empty chart.
+        """
+        return self.real.get_price_bars(
+            symbol, start, end, bar_size=bar_size, outside_rth=outside_rth
+        )
 
     def get_positions(self) -> list[Position]:
         self._prime()

@@ -89,6 +89,12 @@ class ReadOnlyBroker(Broker):
     def get_broker_performance(self, months: int = 6):
         return self.inner.get_broker_performance(months)
 
+    def get_price_bars(self, symbol, start, end, *, bar_size="1h",
+                       outside_rth=True):
+        return self.inner.get_price_bars(
+            symbol, start, end, bar_size=bar_size, outside_rth=outside_rth
+        )
+
     # --- writes are refused -----------------------------------------------
 
     def _refuse(self, what: str) -> None:

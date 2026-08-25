@@ -115,7 +115,7 @@ Schwab reports `cashAvailableForTrading`, `availableFunds`, `buyingPower` and
 `availablefunds` and `buyingpower`. Several of these include borrowed money.
 
 > **What this system does:** with `ALLOW_MARGIN=false` (default) it uses
-> Schwab's `availableFundsNonMarginableTrade` on margin accounts and IBKR's
+> Schwab's `buyingPowerNonMarginableTrade` (capped at `cashBalance`) on margin accounts and IBKR's
 > `min(availablefunds, settledcash)` — the money you can spend without
 > borrowing.
 
@@ -222,7 +222,7 @@ class Broker(ABC):
 cp .env.example .env && chmod 600 .env
 docker compose build
 docker compose run --rm app doctor          # tells you what still needs setting
-docker compose run --rm -it app schwab-login --login default
+docker compose run --rm -it -p 127.0.0.1:8182:8182 app schwab-login --login default
 docker compose up -d
 docker compose run --rm app accounts        # verify trading permissions
 ```

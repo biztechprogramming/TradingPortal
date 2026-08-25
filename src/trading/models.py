@@ -77,6 +77,16 @@ class Quote:
     delayed: bool = False
     halted: bool = False
     source: str = ""
+    #: Session high/low as reported by the broker. ``0.0`` means the broker
+    #: did not supply it, which is different from a genuine zero and is why
+    #: the ladder treats it as "no anchor" rather than pricing off it.
+    day_high: float = 0.0
+    day_low: float = 0.0
+
+    @property
+    def has_day_range(self) -> bool:
+        """True when both session extremes are usable as ladder anchors."""
+        return self.day_high > 0 and self.day_low > 0 and self.day_high >= self.day_low
 
     @property
     def mid(self) -> float:
@@ -103,6 +113,31 @@ class Quote:
         d["mid"] = round(self.mid, 4)
         d["spread_bps"] = round(self.spread_bps, 2)
         return d
+
+
+@dataclass(frozen=True)
+class Bar:
+    """One OHLCV candle. ``ts`` is the bar's *opening* epoch second, UTC.
+
+    Anchoring on the open (not the close) is what lets bars from different
+    sources be merged and de-duplicated by timestamp without an off-by-one
+    bar, and is why the cache uses ``(symbol, ts)`` as its primary key.
+    """
+
+    symbol: str
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def to_row(self) -> list[float]:
+        """Compact form for the dashboard: 1440 bars as objects is wasteful."""
+        return [self.ts, self.open, self.high, self.low, self.close, self.volume]
 
 
 @dataclass(frozen=True)

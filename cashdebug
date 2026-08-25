@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Throwaway diagnostic: print the raw balance fields Schwab reports per account,
+# alongside the figure this system derives from them. Delete when done.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
+PY="$HERE/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+PYTHONPATH="$HERE/src" exec "$PY" - "${1:-.env}" <<'PYEOF'
+import sys
+
+from trading.config import load_settings
+from trading.orchestrator import TradingService
+
+
+def unwrap(broker):
+    """Peel ShadowBroker / ReadOnlyBroker off to reach the Schwab adapter."""
+    for _ in range(5):
+        inner = getattr(broker, "real", None) or getattr(broker, "inner", None)
+        if inner is None:
+            break
+        broker = inner
+    return broker
+
+
+settings = load_settings(sys.argv[1] if len(sys.argv) > 1 else ".env")
+service = TradingService(settings)
+service.connect_all()   # the adapters refuse to read until connected
+
+for name, wrapper in sorted(service.brokers.items()):
+    if "schwab" not in name:
+        continue
+    broker = unwrap(wrapper)
+    try:
+        payload = broker._account_payload(None)
+        balances = broker.get_available_cash()
+    except Exception as exc:
+        print(f"{name}: could not read — {exc}\n")
+        continue
+
+    print(f"{name}   type={payload.get('type')}")
+    print(f"  -> this system uses cash_available = {balances.cash_available}")
+    print(f"     buying_power={balances.buying_power} "
+          f"cash_balance={balances.cash_balance} "
+          f"settled_cash={balances.settled_cash}")
+    print("  raw currentBalances:")
+    for key, value in sorted((payload.get("currentBalances") or {}).items()):
+        print(f"     {key} = {value}")
+    print()
+
+service.close()
+PYEOF

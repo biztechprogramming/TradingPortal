@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Run the dashboard in the foreground (Ctrl-C to stop).
+#
+# ./start is the usual entry point — it also brings up the IBKR gateway and
+# checks the Schwab token ages. This is here for when you just want the
+# dashboard attached to your terminal.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
+ENV_FILE="${ENV_FILE:-.env}"
+
+TOKEN="$(ENV_FILE="$ENV_FILE" ./ensure-token)"
+PORT="$(grep -E '^API_PORT=.+' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+PORT="${PORT:-8787}"
+
+# The token is printed separately rather than embedded in the URL: a URL with
+# a credential in it ends up in browser history and shell scrollback.
+cat <<BANNER
+
+  Dashboard:  http://localhost:${PORT}/
+
+  Token:      ${TOKEN}
+
+  Paste the token when the page asks. It is kept for that browser tab
+  only, so expect to paste it again in a new tab.
+
+  If the page hangs, try 127.0.0.1 instead of localhost.
+  Ctrl-C to stop.
+
+BANNER
+
+exec ./qqq --env-file "$ENV_FILE" serve

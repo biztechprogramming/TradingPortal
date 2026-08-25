@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -546,21 +549,110 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     settings = load_settings(args.env_file)
     token = ensure_api_token(settings)
-    app = create_app(settings)
     print(f"\n{_mode_banner(settings)}")
     print(f"Dashboard: http://{settings.api_host}:{settings.api_port}/?token={token}")
     print(f"API token: {token}\n")
+
+    if getattr(args, "reload", False):
+        # The token must survive the reloader's re-import, or every restart
+        # would invalidate the URL the operator already has open.
+        os.environ["API_TOKEN"] = token
+        print("Auto-reload enabled: editing src/trading restarts the server.\n")
+        uvicorn.run(
+            "trading.api:app_factory",
+            factory=True,
+            host=settings.api_host,
+            port=settings.api_port,
+            log_level=settings.log_level.lower(),
+            reload=True,
+            reload_dirs=[str(Path(__file__).resolve().parent)],
+        )
+        return 0
+
+    app = create_app(settings)
     uvicorn.run(app, host=settings.api_host, port=settings.api_port,
                 log_level=settings.log_level.lower())
     return 0
 
 
+def _code_from_url(url: str) -> str:
+    """Pull ``?code=`` out of a redirected URL.
+
+    ``parse_qs`` percent-decodes, which matters: Schwab codes end in ``@``,
+    shown as ``%40`` in the address bar. Sending the encoded form is rejected.
+    """
+    parsed = urllib.parse.urlparse(url.strip())
+    return (urllib.parse.parse_qs(parsed.query).get("code") or [""])[0]
+
+
+def _open_browser(url: str) -> None:
+    """Best-effort launch. Never a failure — the URL is printed regardless."""
+    try:
+        import webbrowser
+
+        if webbrowser.open(url):
+            print(f"\n{DIM}Opened your browser. If no tab appeared, use the "
+                  f"URL above.{RESET}")
+    except Exception:
+        pass
+
+
+def _await_redirect(
+    catcher, callback_url: str, timeout: float = 300.0
+) -> str | None:
+    """Wait for the browser, while still accepting a pasted URL on stdin.
+
+    Both routes stay open because the listener cannot help when the browser is
+    on another machine — an SSH session to a headless box, for instance, where
+    the redirect lands on the wrong ``127.0.0.1``.
+    """
+    pasted: list[str] = []
+
+    def read_stdin() -> None:
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            return
+        if line.strip():
+            pasted.append(line)
+            catcher.cancel()
+
+    threading.Thread(target=read_stdin, daemon=True).start()
+
+    print(f"\nWaiting for the redirect on {callback_url} …")
+    print(f"{DIM}  (or paste the redirected URL here and press Enter){RESET}")
+
+    result = catcher.wait(timeout)
+
+    if pasted:
+        code = _code_from_url(pasted[0])
+        if not code:
+            print(_colour("No ?code= parameter found in that URL.", RED))
+            return None
+        return code
+
+    if result is None:
+        print(_colour(f"\nTimed out after {int(timeout)}s.", RED))
+        print(f"{DIM}Re-run the command, or use --no-listener to paste the "
+              f"URL by hand.{RESET}")
+        return None
+
+    if result.error:
+        print(_colour(f"\nSchwab did not grant authorisation: "
+                      f"{result.error}", RED))
+        return None
+
+    print(_colour("\nCode received.", GREEN))
+    return result.code
+
+
 def cmd_schwab_login(args: argparse.Namespace) -> int:
     """Interactive OAuth authorisation-code flow for the Schwab Trader API."""
     import base64
-    import urllib.parse
 
     import httpx
+
+    from .oauth_listener import start_catcher
 
     settings = load_settings(args.env_file)
     if not settings.schwab_app_key or not settings.schwab_app_secret:
@@ -589,6 +681,18 @@ def cmd_schwab_login(args: argparse.Namespace) -> int:
     })
     auth_url = f"{settings.schwab_base_url}/v1/oauth/authorize?{params}"
 
+    # Schwab's authorisation codes expire about thirty seconds after you
+    # approve, so the copy-and-paste is a race the user often loses. Catch the
+    # redirect locally when we can; fall back to the paste when we cannot.
+    catcher = None
+    if not args.no_listener:
+        catcher, why_not = start_catcher(
+            settings.schwab_callback_url, settings.state_dir
+        )
+        if catcher is None:
+            print(f"\n{DIM}Local redirect capture unavailable "
+                  f"({why_not}).\n  Falling back to copy-and-paste.{RESET}")
+
     print("\n1. Open this URL and log in to Schwab with the credentials for")
     print(f"   the {login!r} login (your brokerage login, NOT the developer "
           "portal one):\n")
@@ -596,39 +700,74 @@ def cmd_schwab_login(args: argparse.Namespace) -> int:
     print("2. TICK ONLY THE ACCOUNTS this program should reach. Schwab has no")
     print("   read-only scope, so any account you tick can be traded. Accounts")
     print("   you leave unticked are invisible to the program.")
-    print("3. Approve. Your browser will be redirected to")
-    print(f"   {settings.schwab_callback_url} — it will probably show an error")
-    print("   page, which is fine.")
-    print("4. Copy the ENTIRE redirected URL from the address bar and paste it "
-          "below.\n")
-    redirected = input("Redirected URL: ").strip()
 
-    parsed = urllib.parse.urlparse(redirected)
-    query = urllib.parse.parse_qs(parsed.query)
-    code = (query.get("code") or [""])[0]
-    if not code:
-        print(_colour("No ?code= parameter found in that URL.", RED))
-        return 2
+    if catcher is None:
+        print("3. Approve. Your browser will be redirected to")
+        print(f"   {settings.schwab_callback_url} — it will probably show an "
+              "error")
+        print("   page, which is fine.")
+        print("4. Copy the ENTIRE redirected URL from the address bar and "
+              "paste it below.")
+        print(f"\n{DIM}   The code expires about 30 seconds after you approve, "
+              f"so\n   log in to schwab.com first and paste without "
+              f"reading.{RESET}\n")
+        redirected = input("Redirected URL: ").strip()
+        code = _code_from_url(redirected)
+        if not code:
+            print(_colour("No ?code= parameter found in that URL.", RED))
+            return 2
+    else:
+        with catcher:
+            print("3. Approve. Your browser will land on "
+                  f"{settings.schwab_callback_url},")
+            print(f"   {_colour('which this command is now listening on', GREEN)}"
+                  " — the code is")
+            print("   captured automatically. Nothing to copy.")
+            print(f"\n{DIM}   The certificate is self-signed, so the browser "
+                  f"warns once:\n   choose Advanced, then proceed. It is your "
+                  f"own machine.{RESET}")
+            _open_browser(auth_url)
+            code = _await_redirect(catcher, settings.schwab_callback_url)
+        if code is None:
+            return 2
 
     basic = base64.b64encode(
         f"{settings.schwab_app_key}:{settings.schwab_app_secret}".encode()
     ).decode()
-    resp = httpx.post(
-        f"{settings.schwab_base_url}/v1/oauth/token",
-        headers={
-            "Authorization": f"Basic {basic}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": settings.schwab_callback_url,
-        },
-        timeout=30,
-    )
+    try:
+        resp = httpx.post(
+            f"{settings.schwab_base_url}/v1/oauth/token",
+            headers={
+                "Authorization": f"Basic {basic}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": settings.schwab_callback_url,
+            },
+            timeout=30,
+        )
+    except httpx.RequestError as exc:
+        # The code dies in about 30 seconds, so a traceback here would cost
+        # the user the whole round trip while they worked out what it meant.
+        print(_colour(f"\nCould not reach Schwab: {exc}", RED))
+        print(f"{DIM}Check the network and SCHWAB_BASE_URL, then re-run — "
+              f"the code is\nalready spent, so this needs a fresh "
+              f"authorisation.{RESET}")
+        return 2
     if resp.status_code != 200:
         print(_colour(f"Token exchange failed: HTTP {resp.status_code}", RED))
         print(resp.text[:500])
+        if "invalid_grant" in resp.text:
+            print(f"\n{DIM}That code was expired or already used. Codes live "
+                  f"about 30 seconds\nand work exactly once — each attempt "
+                  f"needs a fresh trip through the\nauthorise URL this "
+                  f"command prints.{RESET}")
+        elif "invalid_client" in resp.text:
+            print(f"\n{DIM}Schwab rejected the app credentials. Check "
+                  f"SCHWAB_APP_KEY and\nSCHWAB_APP_SECRET, and that the app "
+                  f"shows Ready For Use in the portal.{RESET}")
         return 2
 
     payload = resp.json()
@@ -717,7 +856,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="check which environment variables are set and how to get the rest",
     )
 
-    sub.add_parser("serve", help="run the local web dashboard and API")
+    p_serve = sub.add_parser("serve", help="run the local web dashboard and API")
+    p_serve.add_argument(
+        "--reload",
+        action="store_true",
+        help="restart the server when the Python source changes. The dashboard "
+             "reloads itself either way; this is only needed for changes "
+             "outside src/trading/web.",
+    )
 
     p_login = sub.add_parser(
         "schwab-login", help="authorise one Schwab login for the Trader API"
@@ -725,6 +871,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument(
         "--login", default=None,
         help="label from SCHWAB_LOGINS; run once per Schwab user ID",
+    )
+    p_login.add_argument(
+        "--no-listener", action="store_true",
+        help="do not listen on the callback port; paste the redirected URL",
     )
 
     p_ack = sub.add_parser("acknowledge", help="clear a broker-mismatch block")

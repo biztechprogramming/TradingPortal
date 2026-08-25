@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Print the dashboard API token, generating and persisting one on first use.
+#
+# Without API_TOKEN set, the app invents a new token on every start, which
+# makes the dashboard URL unusable twice. Pinning one is the difference
+# between "open the bookmark" and "go and find the new token".
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-$HERE/.env}"
+
+if [ ! -f "$ENV_FILE" ]; then
+    echo "No $ENV_FILE. Copy .env.example first." >&2
+    exit 1
+fi
+
+PY="$HERE/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+
+token="$(grep -E '^API_TOKEN=.+' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+
+if [ -z "$token" ]; then
+    token="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    if grep -qE '^API_TOKEN=' "$ENV_FILE"; then
+        tmp="$(mktemp)"
+        sed "s|^API_TOKEN=.*|API_TOKEN=${token}|" "$ENV_FILE" > "$tmp"
+        cat "$tmp" > "$ENV_FILE"      # rewrite in place, preserving the mode
+        rm -f "$tmp"
+    else
+        printf '\nAPI_TOKEN=%s\n' "$token" >> "$ENV_FILE"
+    fi
+    chmod 600 "$ENV_FILE"
+    echo "Generated a fixed API_TOKEN and saved it to $ENV_FILE." >&2
+fi
+
+printf '%s\n' "$token"

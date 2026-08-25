@@ -15,6 +15,7 @@ from ..config import Settings
 from ..models import (
     Account,
     Balances,
+    Bar,
     Order,
     OrderState,
     Position,
@@ -128,6 +129,23 @@ class Broker(abc.ABC):
 
     def get_broker_performance(self, months: int = 6) -> list[NavPoint] | None:
         """The broker's own NAV/return series, when it publishes one."""
+        return None
+
+    def get_price_bars(
+        self,
+        symbol: str,
+        start: float,
+        end: float,
+        *,
+        bar_size: str = "1h",
+        outside_rth: bool = True,
+    ) -> list[Bar] | None:
+        """OHLCV candles in ``[start, end]``, as epoch seconds.
+
+        ``None`` means this adapter cannot supply bars at all, which the
+        candle cache treats as "ask a different broker" rather than as an
+        error. An empty list means "supported, but nothing in that range".
+        """
         return None
 
     # --- shared helpers ---------------------------------------------------

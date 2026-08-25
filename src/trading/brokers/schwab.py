@@ -54,6 +54,7 @@ from ..errors import (
 )
 from ..models import (
     Account,
+    Bar,
     Balances,
     Order,
     OrderState,
@@ -451,14 +452,26 @@ class SchwabBroker(Broker):
                         continue
             return 0.0
 
-        # For a margin account, availableFundsNonMarginableTrade is the amount
-        # spendable without borrowing, which is what cash-only mode wants.
+        # For a margin account we want the money spendable without borrowing.
+        #
+        # NOT availableFundsNonMarginableTrade: despite the name, Schwab
+        # reports that as *excess* funds, and it collapses to 0 as soon as the
+        # account holds marginable stock (maintenanceRequirement then equals
+        # longMarketValue). Observed live: an account with $487.88 cash and
+        # QQQ reported 0.0, while the same field on a flat account was
+        # correct. Sizing off it would deploy nothing whenever we are already
+        # invested — which is exactly when GO LONG needs to add idle cash.
+        #
+        # buyingPowerNonMarginableTrade is the buying power for a security
+        # requiring 100% cash, which is the figure we want. It is bounded by
+        # cashBalance so a future Schwab change cannot let us spend borrowed
+        # money, and floored at zero because cashBalance goes negative when a
+        # margin loan is outstanding.
         if account_type == "MARGIN":
-            cash_available = num(
-                "availableFundsNonMarginableTrade",
-                "cashAvailableForTrading",
-                "cashBalance",
-            )
+            cash_available = max(0.0, min(
+                num("buyingPowerNonMarginableTrade", "cashBalance"),
+                num("cashBalance"),
+            ))
         else:
             cash_available = num("cashAvailableForTrading", "cashBalance")
 
@@ -592,6 +605,69 @@ class SchwabBroker(Broker):
         if not isinstance(body, list):
             return []
         return [t for t in (_parse_transaction(raw) for raw in body) if t]
+
+    def get_price_bars(
+        self,
+        symbol: str,
+        start: float,
+        end: float,
+        *,
+        bar_size: str = "1h",
+        outside_rth: bool = True,
+    ) -> list[Bar] | None:
+        """Hourly candles, aggregated up from Schwab's 30-minute bars.
+
+        Schwab's ``frequencyType=minute`` tops out at a 30-minute bar, so an
+        hourly series has to be built here. Bars are bucketed by the UTC hour
+        of their opening timestamp, which keeps them aligned with IBKR's
+        hourly bars so the two can share one cache table.
+        """
+        if bar_size != "1h":
+            return None
+
+        resp = self._request(
+            "GET",
+            "/marketdata/v1/pricehistory",
+            params={
+                "symbol": symbol.upper(),
+                "periodType": "day",
+                "frequencyType": "minute",
+                "frequency": 30,
+                "startDate": int(start * 1000),
+                "endDate": int(end * 1000),
+                "needExtendedHoursData": "true" if outside_rth else "false",
+            },
+        )
+        body = resp.json() or {}
+
+        buckets: dict[int, list[dict[str, Any]]] = {}
+        for candle in body.get("candles", []) or []:
+            stamp = candle.get("datetime")
+            if not stamp:
+                continue
+            ts = int(float(stamp) / 1000.0)
+            if ts < start or ts > end:
+                continue
+            buckets.setdefault(ts - (ts % 3600), []).append(candle)
+
+        bars: list[Bar] = []
+        for hour, group in sorted(buckets.items()):
+            group.sort(key=lambda c: c.get("datetime", 0))
+            try:
+                bars.append(
+                    Bar(
+                        symbol=symbol.upper(),
+                        ts=hour,
+                        open=float(group[0].get("open", 0) or 0),
+                        high=max(float(c.get("high", 0) or 0) for c in group),
+                        low=min(float(c.get("low", 0) or 0) for c in group),
+                        close=float(group[-1].get("close", 0) or 0),
+                        volume=sum(float(c.get("volume", 0) or 0) for c in group),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        return bars
 
     def get_price_history(
         self, symbol: str, start: date, end: date
@@ -815,6 +891,9 @@ def _parse_quote(symbol: str, entry: dict[str, Any]) -> Quote:
         delayed=(realtime is False),
         halted=("HALT" in status or "CLOSED" == status),
         source="schwab",
+        # Absent before the session's first trade; 0.0 then means "no anchor".
+        day_high=float(quote.get("highPrice", 0) or 0),
+        day_low=float(quote.get("lowPrice", 0) or 0),
     )
 
 

@@ -63,15 +63,74 @@ def test_margin_account_cash_ignores_borrowable_funds(tmp_path):
             "currentBalances": {
                 "cashBalance": 10_000.0,
                 "cashAvailableForTrading": 10_000.0,
+                "buyingPowerNonMarginableTrade": 10_000.0,
                 "availableFundsNonMarginableTrade": 9_500.0,
                 "buyingPower": 40_000.0,
             },
         }})
 
     balances = broker_with(handler, tmp_path).get_available_cash()
-    # The non-marginable figure is what we may spend without borrowing.
-    assert balances.cash_available == 9_500.0
+    # Spendable without borrowing — not the $40k that includes margin.
+    assert balances.cash_available == 10_000.0
     assert balances.buying_power == 40_000.0
+
+
+def test_margin_account_holding_stock_still_reports_its_cash(tmp_path):
+    """The live payload that exposed the bug.
+
+    Schwab zeroes availableFundsNonMarginableTrade once the account holds
+    marginable stock. Reading it would have sized every GO LONG to zero
+    shares on an account that was already invested.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"securitiesAccount": {
+            "type": "MARGIN",
+            "currentBalances": {
+                "cashBalance": 487.8799999999999,
+                "availableFunds": 487.88,
+                "availableFundsNonMarginableTrade": 0.0,
+                "buyingPowerNonMarginableTrade": 487.88,
+                "buyingPower": 487.88,
+                "longMarketValue": 136_240.0,
+                "maintenanceRequirement": 136_240.0,
+                "marginBalance": 0.0,
+            },
+        }})
+
+    balances = broker_with(handler, tmp_path).get_available_cash()
+    assert balances.cash_available == pytest.approx(487.88)
+
+
+def test_margin_cash_never_exceeds_the_cash_balance(tmp_path):
+    """Buying power above the cash balance means borrowing. Refuse it."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"securitiesAccount": {
+            "type": "MARGIN",
+            "currentBalances": {
+                "cashBalance": 1_000.0,
+                "buyingPowerNonMarginableTrade": 5_000.0,
+                "buyingPower": 20_000.0,
+            },
+        }})
+
+    balances = broker_with(handler, tmp_path).get_available_cash()
+    assert balances.cash_available == 1_000.0
+
+
+def test_margin_loan_reports_no_spendable_cash(tmp_path):
+    """A negative cash balance is an outstanding loan, not spending money."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"securitiesAccount": {
+            "type": "MARGIN",
+            "currentBalances": {
+                "cashBalance": -2_500.0,
+                "buyingPowerNonMarginableTrade": 0.0,
+                "marginBalance": -2_500.0,
+            },
+        }})
+
+    balances = broker_with(handler, tmp_path).get_available_cash()
+    assert balances.cash_available == 0.0
 
 
 def test_cash_account_uses_cash_available_for_trading(tmp_path):

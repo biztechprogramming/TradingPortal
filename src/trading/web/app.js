@@ -20,6 +20,7 @@ let TOKEN = readToken();
 let busy = false;
 let longSymbol = 'QQQ';
 let shortSymbol = 'PSQ';
+let assetVersion = null;
 
 const $ = (id) => document.getElementById(id);
 const fmtMoney = (n) =>
@@ -30,6 +31,13 @@ const fmtNum = (n, d = 0) =>
   n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US', {
     minimumFractionDigits: d, maximumFractionDigits: d,
   });
+// Ladder prices can be sub-penny (PSQ steps by 0.005), so prices are never
+// formatted with the 2-decimal money formatter.
+const fmtPrice = (n, tick) => {
+  if (n === null || n === undefined) return '—';
+  const decimals = tick && tick < 0.01 ? 3 : 2;
+  return `$${Number(n).toFixed(decimals)}`;
+};
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -61,6 +69,28 @@ $('token-save').addEventListener('click', () => {
   $('token-prompt').classList.add('hidden');
   refresh();
 });
+
+// --- live reload ------------------------------------------------------------
+// The server serves the dashboard assets with no-store and fingerprints them
+// at /api/version. When the fingerprint changes -- an edit to app.js, or a
+// server restart -- the open page reloads itself instead of silently running
+// stale code.
+
+async function checkVersion() {
+  try {
+    const res = await fetch('/api/version', { cache: 'no-store' });
+    if (!res.ok) return;
+    const body = await res.json();
+    const stamp = `${body.assets}:${body.server_started_at}`;
+    if (assetVersion === null) { assetVersion = stamp; return; }
+    if (stamp !== assetVersion) {
+      console.info('dashboard assets changed; reloading');
+      window.location.reload();
+    }
+  } catch (err) {
+    // Server restarting mid-poll is normal; the next tick picks it up.
+  }
+}
 
 // --- alerts -----------------------------------------------------------------
 
@@ -122,16 +152,13 @@ function renderCombined(c) {
 }
 
 function renderBrokers(status) {
-  const lastResults = {};
-  const last = status.state?.last_result;
-  if (last?.results) for (const r of last.results) lastResults[r.broker] = r;
+  const lastFills = status.last_fills || {};
+  const symbols = [longSymbol, shortSymbol];
 
   $('brokers').innerHTML = Object.entries(status.brokers)
     .map(([name, b]) => {
-      const result = lastResults[name];
-      const orders = (b.open_orders || [])
-        .map((o) => `${o.side} ${fmtNum(o.quantity)} ${o.symbol} @ ${fmtNum(o.limit_price, 2)} (${o.state})`)
-        .join('<br>') || '<span class="muted">none</span>';
+      const result = (status.state?.last_result?.results || [])
+        .find((r) => r.broker === name);
       const errorHtml = b.error
         ? `<div class="alert alert-error" style="margin-top:10px">${esc(b.error)}</div>`
         : (result?.errors?.length
@@ -142,6 +169,43 @@ function renderBrokers(status) {
         : '<span class="muted">none</span>';
       const roBadge = b.read_only ? '<span class="badge-ro">READ-ONLY</span>' : '';
 
+      // Position is whatever the broker reports and nothing else. Last shares
+      // is history -- what most recently filled -- and is shown beside it so
+      // the two are never confused for one another.
+      const fills = lastFills[name] || {};
+      const positionRows = symbols.map((sym) => {
+        const held = qty(b, sym);
+        const last = fills[sym];
+        const tick = window.__lastLadder?.symbols?.[sym]?.tick;
+        const lastCell = last
+          ? `${fmtNum(last.shares)} <span class="muted">@ ${
+              fmtPrice(last.price, tick)}</span>`
+          : '<span class="muted">—</span>';
+        return `<tr>
+          <td>${esc(sym)}</td>
+          <td class="num">${fmtNum(held)}</td>
+          <td class="num">${lastCell}</td>
+        </tr>`;
+      }).join('');
+
+      const orders = (b.open_orders || []).filter((o) => o.state !== 'FILLED');
+      const orderRows = orders.length
+        ? orders.map((o) => {
+            const tick = window.__lastLadder?.symbols?.[o.symbol]?.tick;
+            const filled = o.filled_quantity || 0;
+            const q = filled > 0
+              ? `${fmtNum(filled)} / ${fmtNum(o.quantity)}`
+              : fmtNum(o.quantity);
+            return `<tr>
+              <td><span class="pill pill-${o.side === 'BUY' ? 'LONG' : 'SHORT'}">${esc(o.side)}</span></td>
+              <td>${esc(o.symbol)}</td>
+              <td class="num">${q}</td>
+              <td class="num">${fmtPrice(o.limit_price, tick)}</td>
+              <td>${esc(o.state)}</td>
+            </tr>`;
+          }).join('')
+        : `<tr><td colspan="5" class="muted">no working orders</td></tr>`;
+
       return `<div class="panel">
         <div class="broker-head">
           <span class="broker-name">
@@ -151,15 +215,28 @@ function renderBrokers(status) {
         </div>
         <div class="kv"><span>Connection</span><span>${b.connected && !b.error ? 'connected' : 'disconnected'}</span></div>
         <div class="kv"><span>Account</span><span>${acct}</span></div>
-        <div class="kv"><span>${longSymbol} shares</span><span>${fmtNum(qty(b, longSymbol))}</span></div>
-        <div class="kv"><span>${shortSymbol} shares</span><span>${fmtNum(qty(b, shortSymbol))}</span></div>
         <div class="kv"><span>Cash available</span><span>${fmtMoney(b.balances?.cash_available)}</span></div>
         <div class="kv"><span>Buying power</span><span>${fmtMoney(b.balances?.buying_power)}</span></div>
-        <div class="kv"><span>Outstanding orders</span><span>${orders}</span></div>
-        <div class="kv"><span>Last command</span><span>${esc(result?.command || status.state?.last_command || '—')}</span></div>
-        <div class="kv"><span>Last execution price</span><span>${
-          result?.last_execution_price ? fmtMoney(result.last_execution_price) : '—'}</span></div>
-        <div class="kv"><span>Last shares</span><span>${fmtNum(result?.shares || 0)}</span></div>
+
+        <h3 class="sub-head">Positions</h3>
+        <table class="sub-table">
+          <thead><tr><th>Symbol</th><th class="num">Held</th><th class="num">Last filled</th></tr></thead>
+          <tbody>${positionRows}</tbody>
+        </table>
+
+        <h3 class="sub-head">
+          Working orders
+          <span class="pill ${orders.length ? 'pill-warn' : 'pill-UNKNOWN'}">${orders.length}</span>
+        </h3>
+        <table class="sub-table">
+          <thead><tr><th>Side</th><th>Symbol</th><th class="num">Qty</th>
+            <th class="num">Limit</th><th>State</th></tr></thead>
+          <tbody>${orderRows}</tbody>
+        </table>
+        <p class="sub-note">
+          A working order is not a position. Nothing is held until the broker
+          reports the fill.
+        </p>
         ${errorHtml}
       </div>`;
     })
@@ -198,10 +275,13 @@ function renderHoldings(data) {
     <tbody>${rows.join('')}</tbody></table>`;
 }
 
+const MAX_EVENTS_SHOWN = 25;
+
 function renderEvents(events) {
   $('events').innerHTML = events
     .slice()
     .reverse()
+    .slice(0, MAX_EVENTS_SHOWN)
     .map((e) => {
       const time = new Date(e.ts * 1000).toLocaleTimeString();
       const detail = summarise(e);
@@ -226,6 +306,401 @@ function summarise(e) {
   if (d.summary) return d.summary;
   if (d.exposure) return `exposure ${d.exposure} (${d.label || ''})`;
   return JSON.stringify(d).slice(0, 200);
+}
+
+// --- ladder -----------------------------------------------------------------
+
+function renderLadder(ladder) {
+  if (!ladder.enabled) {
+    $('ladder').innerHTML =
+      '<div class="muted">Ladder disabled (LADDER_ENABLED=false).</div>';
+    $('ladder-note').textContent = '';
+    return;
+  }
+
+  const accounts = ladder.accounts || {};
+  // Which price each account already has working, so a rung can show that
+  // clicking it re-prices rather than adds.
+  const workingBySymbol = {};
+  for (const [name, acct] of Object.entries(accounts)) {
+    for (const o of acct.open_orders || []) {
+      if (o.side !== 'BUY') continue;
+      (workingBySymbol[o.symbol] ||= []).push({ account: name, price: o.limit_price });
+    }
+  }
+
+  const cards = Object.values(ladder.symbols || {}).map((entry) => {
+    const sym = entry.symbol;
+    const q = entry.quote || {};
+    const tick = entry.tick;
+    const working = workingBySymbol[sym] || [];
+
+    if (entry.error && !(entry.rungs || []).length) {
+      return `<div class="panel ladder-card">
+        <div class="broker-head"><span class="broker-name">${esc(sym)}</span></div>
+        <div class="alert alert-warn">${esc(entry.error)}</div>
+      </div>`;
+    }
+
+    // Session structure: not just where the extremes are, but when, and what
+    // price has done since each one.
+    const ss = entry.session || {};
+    const hhmm = (ts) => ts
+      ? new Date(ts * 1000).toLocaleTimeString('en-US',
+          { hour: 'numeric', minute: '2-digit' })
+      : '—';
+    const level = (label, value, at, extra = '') =>
+      `<div class="kv session-kv">
+        <span>${label}</span>
+        <span class="num">${fmtPrice(value || null, tick)}
+          <span class="muted session-at">${at ? `at ${esc(hhmm(at))}` : ''}</span>
+          ${extra}</span>
+      </div>`;
+
+    // Which extreme is the live one: after a low, the run-up is what matters.
+    const upLeg = ss.low_came_first === true;
+    const sessionHtml = ss.complete
+      ? `${level('High of day', ss.day_high, ss.day_high_at)}
+         ${level('Low of day', ss.day_low, ss.day_low_at)}
+         ${level('High since low', ss.high_since_low, ss.high_since_low_at,
+             upLeg ? '<span class="pill pill-anchor">LEG</span>' : '')}
+         ${level('Low since high', ss.low_since_high, ss.low_since_high_at,
+             upLeg === false ? '<span class="pill pill-anchor">LEG</span>' : '')}
+         <div class="sub-note">
+           ${ss.bars_used} hourly bar(s) this session — times are to the hour.
+           ${ss.note ? esc(ss.note) : ''}
+         </div>`
+      : `<div class="alert alert-warn">${esc(ss.note || 'no session data yet')}</div>`;
+
+    const workingNote = working.length
+      ? `<div class="alert alert-warn ladder-working">
+           Working: ${working.map((w) =>
+             `${esc(w.account)} @ ${fmtPrice(w.price, tick)}`).join(', ')}
+           — clicking a price re-prices ${working.length > 1 ? 'these orders' : 'this order'}.
+         </div>`
+      : '';
+
+    const rows = (entry.rungs || []).map((r) => {
+      const isWorking = working.some(
+        (w) => Math.abs(w.price - r.price) < (tick || 0.01) / 2);
+      const badges = [
+        r.offset_steps === 0
+          ? `<span class="pill pill-anchor">${esc(r.anchor)}</span>` : '',
+        r.marketable ? '<span class="pill pill-warn">FILLS NOW</span>' : '',
+        isWorking ? '<span class="pill pill-ok">WORKING</span>' : '',
+      ].filter(Boolean).join(' ');
+      const cls = ['rung', r.marketable ? 'rung-marketable' : '',
+        isWorking ? 'rung-working' : ''].filter(Boolean).join(' ');
+      return `<button class="${cls}"
+          data-symbol="${esc(sym)}" data-price="${r.price}" data-tick="${tick}">
+        <span class="rung-price">${fmtPrice(r.price, tick)}</span>
+        <span class="rung-label">${esc(r.label)}</span>
+        <span class="rung-badges">${badges}</span>
+      </button>`;
+    }).join('');
+
+    return `<div class="panel ladder-card">
+      <div class="broker-head">
+        <span class="broker-name">${esc(sym)}</span>
+        <span class="muted">step ${fmtPrice(entry.step, tick)}</span>
+      </div>
+      ${sessionHtml}
+      <div class="kv"><span>Last</span>
+        <span class="num">${fmtPrice(q.last, tick)}</span></div>
+      <div class="kv"><span>Bid / Ask</span>
+        <span class="num">${fmtPrice(q.bid, tick)} / ${fmtPrice(q.ask, tick)}</span></div>
+      ${workingNote}
+      <div class="rungs">${rows || '<div class="muted">no rungs</div>'}</div>
+    </div>`;
+  }).join('');
+
+  $('ladder').innerHTML = cards || '<div class="muted">no symbols</div>';
+  $('ladder-note').textContent = `${ladder.levels} level(s) each side of high and low`;
+
+  for (const btn of document.querySelectorAll('.rung')) {
+    btn.addEventListener('click', (e) => {
+      const el = e.currentTarget;
+      sendLadderOrder(el.dataset.symbol, Number(el.dataset.price),
+        Number(el.dataset.tick));
+    });
+  }
+}
+
+async function sendLadderOrder(symbol, price, tick) {
+  if (busy) return;
+  const requestId = `LADDER-${symbol}-${price}-${Date.now()}-${
+    Math.random().toString(36).slice(2, 8)}`;
+  setBusy(true);
+  try {
+    const body = { symbol, limit_price: price, request_id: requestId };
+    let res = await api('/api/ladder/order', {
+      method: 'POST', body: JSON.stringify(body),
+    });
+
+    if (res.status === 409 && res.body.status === 'CONFIRMATION_REQUIRED') {
+      const ok = await askConfirm(
+        `Buy ${symbol} at ${fmtPrice(price, tick)}`,
+        ladderConfirmBody(symbol, price, tick, res.body),
+      );
+      if (!ok) { setBusy(false); return; }
+      res = await api('/api/ladder/order', {
+        method: 'POST',
+        body: JSON.stringify({ ...body, confirm_token: res.body.confirm_token }),
+      });
+    }
+    reportLadderResult(symbol, price, tick, res);
+  } catch (err) {
+    setAlerts([{ level: 'error', html: esc(String(err)) }]);
+  } finally {
+    setBusy(false);
+    refresh();
+  }
+}
+
+/** Say plainly what the click will do before it is confirmed. */
+function ladderConfirmBody(symbol, price, tick, body) {
+  const lines = [`<p>${esc(body.detail || '')}</p>`];
+  const working = window.__lastLadder?.accounts || {};
+  const existing = [];
+  for (const [name, acct] of Object.entries(working)) {
+    for (const o of acct.open_orders || []) {
+      if (o.symbol === symbol && o.side === 'BUY') {
+        existing.push(`${esc(name)}: ${fmtNum(o.remaining_quantity ?? o.quantity)}
+          @ ${fmtPrice(o.limit_price, tick)}`);
+      }
+    }
+  }
+  if (existing.length) {
+    lines.push(`<p class="confirm-warn"><strong>This re-prices a working order.</strong>
+      No new order is added.<br>${existing.join('<br>')}
+      <br>→ ${fmtPrice(price, tick)}</p>`);
+  } else {
+    lines.push(`<p><strong>This places a new order</strong> sized against the
+      whole account at ${fmtPrice(price, tick)}.</p>`);
+  }
+
+  const entry = window.__lastLadder?.symbols?.[symbol];
+  const ask = entry?.quote?.ask;
+  if (ask && price >= ask) {
+    lines.push(`<p class="confirm-warn"><strong>This fills immediately.</strong>
+      ${esc(symbol)} is offered at ${fmtPrice(ask, tick)}, so a buy limit at
+      ${fmtPrice(price, tick)} crosses the spread and executes now at the
+      market — it will not wait at this price.</p>`);
+  }
+  lines.push('<p class="muted">A filled order becomes a position only when the '
+    + 'broker reports it. The dashboard will not show a position until then.</p>');
+  return lines.join('');
+}
+
+function reportLadderResult(symbol, price, tick, res) {
+  const b = res.body || {};
+  if (b.status === 'OK' || b.status === 'PARTIAL') {
+    const lines = (b.results || []).map((r) => {
+      if (!r.ok) {
+        return `${esc(r.broker)}: FAILED — ${(r.errors || []).map(esc).join('; ')}`;
+      }
+      const verb = { PLACED: 'placed', MODIFIED: 're-priced', RESIZED: 're-priced (resized)',
+        UNCHANGED: 'already at this price' }[r.action] || r.action;
+      const warn = (r.warnings || []).length
+        ? `<br><span class="muted">${r.warnings.map(esc).join('<br>')}</span>` : '';
+      return `${esc(r.broker)}: ${verb} ${fmtNum(r.quantity)} ${esc(symbol)}
+        @ ${fmtPrice(r.limit_price, tick)}${warn}`;
+    }).join('<br>');
+    setAlerts([{
+      level: b.status === 'OK' ? 'ok' : 'error',
+      html: `<strong>${esc(symbol)} @ ${fmtPrice(price, tick)}
+        ${b.status === 'OK' ? 'done' : 'PARTIAL — accounts differ'}.</strong>
+        <br>${lines}`,
+    }]);
+    return;
+  }
+  const detail = b.detail
+    || (b.results || []).flatMap((r) => r.errors || []).map(esc).join('<br>')
+    || JSON.stringify(b).slice(0, 400);
+  setAlerts([{
+    level: 'error',
+    html: `<strong>${esc(symbol)} @ ${fmtPrice(price, tick)} — ${
+      esc(b.status || res.status)}</strong><br>${detail}`,
+  }]);
+}
+
+// --- candles ----------------------------------------------------------------
+// Hourly OHLC including extended hours. The server keeps 90 days cached and
+// only re-fetches the recent edge, so changing range here is free -- it is a
+// slice of data already in the browser, not a new request.
+
+const RANGES = [
+  { label: '1D', days: 1 },
+  { label: '5D', days: 5 },
+  { label: '1M', days: 30 },
+  { label: '3M', days: 90 },
+];
+let rangeDays = 5;
+let candleData = {};
+
+function renderRangePicker() {
+  $('range-picker').innerHTML = RANGES.map((r) =>
+    `<button class="small range-btn ${r.days === rangeDays ? 'range-on' : ''}"
+       data-days="${r.days}">${r.label}</button>`).join('');
+  for (const btn of document.querySelectorAll('.range-btn')) {
+    btn.addEventListener('click', (e) => {
+      rangeDays = Number(e.currentTarget.dataset.days);
+      renderRangePicker();
+      renderCandles();
+    });
+  }
+}
+
+async function refreshCandles(refresh = true) {
+  if (!TOKEN) return;
+  try {
+    const results = await Promise.all(
+      [longSymbol, shortSymbol].map((sym) =>
+        api(`/api/candles?symbol=${encodeURIComponent(sym)}&refresh=${refresh}`)
+          .then((r) => [sym, r.body])
+          .catch(() => [sym, null])),
+    );
+    for (const [sym, body] of results) if (body) candleData[sym] = body;
+    const days = Object.values(candleData)[0]?.days;
+    if (days) $('candle-days').textContent = days;
+    renderCandles();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function renderCandles() {
+  const symbols = [longSymbol, shortSymbol];
+  const host = $('candles');
+  const charts = symbols.map((sym) => {
+    const data = candleData[sym];
+    if (!data) return `<div class="candle-block"><h3 class="sub-head">${esc(sym)}</h3>
+      <div class="muted">loading…</div></div>`;
+    const err = (data.refresh?.errors || []).length
+      ? `<div class="alert alert-warn">${data.refresh.errors.map(esc).join('<br>')}</div>`
+      : '';
+    return `<div class="candle-block">
+      <h3 class="sub-head">${esc(sym)}
+        <span class="muted">${(data.bars || []).length} bars cached</span></h3>
+      ${err}
+      ${candleChart(sym, data)}
+    </div>`;
+  }).join('');
+  host.innerHTML = charts;
+  for (const sym of symbols) attachCandleCrosshair(sym);
+}
+
+/** Candlestick SVG for one symbol over the selected range. */
+function candleChart(symbol, data) {
+  const cutoff = Date.now() / 1000 - rangeDays * 86400;
+  const bars = (data.bars || []).filter((b) => b[0] >= cutoff);
+  if (bars.length < 2) {
+    return '<div class="muted" style="padding:20px 0">Not enough cached data '
+      + 'for this range yet.</div>';
+  }
+
+  const W = 1000, H = 300;
+  const M = { top: 10, right: 58, bottom: 22, left: 8 };
+  const plotW = W - M.left - M.right;
+  const plotH = H - M.top - M.bottom;
+
+  let lo = Math.min(...bars.map((b) => b[3]));
+  let hi = Math.max(...bars.map((b) => b[2]));
+  const pad = Math.max((hi - lo) * 0.06, 0.01);
+  lo -= pad; hi += pad;
+
+  // Bars are laid out by index, not by clock time. Extended-hours sessions
+  // leave real gaps overnight and at weekends; spacing by time would render
+  // those as wide dead bands and squeeze the actual trading into slivers.
+  const slot = plotW / bars.length;
+  const bodyW = Math.max(1, Math.min(9, slot * 0.7));
+  const cx = (i) => M.left + slot * (i + 0.5);
+  const py = (v) => M.top + plotH - ((v - lo) / (hi - lo)) * plotH;
+
+  const ticks = 4;
+  const grid = Array.from({ length: ticks + 1 }, (_, i) => {
+    const value = lo + ((hi - lo) * i) / ticks;
+    const y = py(value);
+    return `<line class="grid-line" x1="${M.left}" y1="${y}" x2="${M.left + plotW}" y2="${y}"/>
+      <text class="axis-text" x="${M.left + plotW + 6}" y="${y + 3.5}"
+        text-anchor="start">${value.toFixed(2)}</text>`;
+  }).join('');
+
+  const candles = bars.map((b, i) => {
+    const [, o, h, l, c] = b;
+    const up = c >= o;
+    const cls = up ? 'candle-up' : 'candle-down';
+    const x = cx(i);
+    const top = py(Math.max(o, c));
+    const bottom = py(Math.min(o, c));
+    const height = Math.max(1, bottom - top);
+    return `<line class="wick ${cls}" x1="${x.toFixed(2)}" y1="${py(h).toFixed(2)}"
+        x2="${x.toFixed(2)}" y2="${py(l).toFixed(2)}"/>
+      <rect class="body ${cls}" x="${(x - bodyW / 2).toFixed(2)}" y="${top.toFixed(2)}"
+        width="${bodyW.toFixed(2)}" height="${height.toFixed(2)}"/>`;
+  }).join('');
+
+  const first = new Date(bars[0][0] * 1000);
+  const last = new Date(bars[bars.length - 1][0] * 1000);
+  const stamp = (d) => d.toLocaleString('en-US',
+    { month: 'short', day: 'numeric', hour: 'numeric' });
+
+  return `<figure class="chart-figure candle-figure" data-symbol="${esc(symbol)}">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
+        aria-label="${esc(symbol)} hourly candles">
+      ${grid}${candles}
+      <line class="crosshair candle-cross" y1="${M.top}" y2="${M.top + plotH}"
+        style="display:none"/>
+      <rect class="candle-hit" x="${M.left}" y="${M.top}" width="${plotW}"
+        height="${plotH}" fill="transparent"/>
+    </svg>
+    <div class="chart-tip candle-tip" style="display:none"></div>
+    <figcaption class="muted">${esc(stamp(first))} → ${esc(stamp(last))}
+      · ${bars.length} hourly bars${data.outside_rth ? ' · extended hours' : ''}</figcaption>
+  </figure>`;
+}
+
+function attachCandleCrosshair(symbol) {
+  const fig = document.querySelector(`.candle-figure[data-symbol="${symbol}"]`);
+  if (!fig) return;
+  const svg = fig.querySelector('svg');
+  const hit = fig.querySelector('.candle-hit');
+  const line = fig.querySelector('.candle-cross');
+  const tip = fig.querySelector('.candle-tip');
+  if (!svg || !hit) return;
+
+  const cutoff = Date.now() / 1000 - rangeDays * 86400;
+  const bars = (candleData[symbol]?.bars || []).filter((b) => b[0] >= cutoff);
+  if (!bars.length) return;
+  const W = 1000, M = { left: 8, right: 58 };
+  const plotW = W - M.left - M.right;
+  const slot = plotW / bars.length;
+
+  hit.addEventListener('mouseleave', () => {
+    line.style.display = 'none'; tip.style.display = 'none';
+  });
+  hit.addEventListener('mousemove', (event) => {
+    const box = svg.getBoundingClientRect();
+    const svgX = (event.clientX - box.left) * (W / box.width);
+    const i = Math.max(0, Math.min(bars.length - 1,
+      Math.floor((svgX - M.left) / slot)));
+    const [ts, o, h, l, c, v] = bars[i];
+    const x = M.left + slot * (i + 0.5);
+    line.setAttribute('x1', x); line.setAttribute('x2', x);
+    line.style.display = '';
+    const when = new Date(ts * 1000).toLocaleString('en-US',
+      { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    tip.innerHTML = `<div class="tip-date">${esc(when)}</div>
+      <div class="tip-row"><span>O</span><span class="tip-value">${o.toFixed(2)}</span></div>
+      <div class="tip-row"><span>H</span><span class="tip-value">${h.toFixed(2)}</span></div>
+      <div class="tip-row"><span>L</span><span class="tip-value">${l.toFixed(2)}</span></div>
+      <div class="tip-row"><span>C</span><span class="tip-value">${c.toFixed(2)}</span></div>
+      <div class="tip-row"><span>Vol</span><span class="tip-value">${fmtNum(v)}</span></div>`;
+    tip.style.display = '';
+    const left = (x / W) * box.width;
+    tip.style.left = `${Math.min(Math.max(left + 12, 0), box.width - tip.offsetWidth - 4)}px`;
+    tip.style.top = '8px';
+  });
 }
 
 // --- performance -------------------------------------------------------------
@@ -476,11 +951,12 @@ function attachCrosshair(host, ctx) {
 async function refresh() {
   if (!TOKEN) { showTokenPrompt(); return; }
   try {
-    const [status, holdings, audit, perf] = await Promise.all([
+    const [status, holdings, audit, perf, ladder] = await Promise.all([
       api('/api/status'),
       api('/api/holdings'),
       api('/api/audit?limit=80'),
       api('/api/performance'),
+      api('/api/ladder'),
     ]);
     const s = status.body;
     renderBanner(s);
@@ -490,6 +966,10 @@ async function refresh() {
     renderEvents(audit.body.events || []);
     renderChart(perf.body);
     renderReturns(perf.body);
+    // Kept for the confirmation dialog, which needs to state whether a click
+    // will place a new order or re-price a working one.
+    window.__lastLadder = ladder.body;
+    renderLadder(ladder.body);
 
     const alerts = [];
     if (s.state?.mismatch) {
@@ -520,6 +1000,7 @@ async function refresh() {
 function setBusy(state) {
   busy = state;
   for (const id of ['btn-long', 'btn-short', 'btn-flat']) $(id).disabled = state;
+  for (const btn of document.querySelectorAll('.rung')) btn.disabled = state;
 }
 
 function askConfirm(title, body) {
@@ -605,5 +1086,12 @@ for (const id of ['btn-long', 'btn-short', 'btn-flat']) {
 }
 $('btn-refresh').addEventListener('click', refresh);
 
+renderRangePicker();
 refresh();
 setInterval(() => { if (!busy) refresh(); }, 10000);
+refreshCandles();
+setInterval(() => { if (!busy) refreshCandles(); }, 60000);
+
+// Poll for code changes more often than data: an edit should show up quickly.
+checkVersion();
+setInterval(checkVersion, 3000);

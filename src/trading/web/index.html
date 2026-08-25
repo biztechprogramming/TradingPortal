@@ -33,6 +33,34 @@
   <section id="alerts"></section>
 
   <section class="panel">
+    <div class="panel-head">
+      <h2>Price ladder</h2>
+      <span class="muted" id="ladder-note"></span>
+    </div>
+    <p class="chart-caption">
+      One click buys at that exact limit price. Prices at or above the ask are
+      marked <span class="pill pill-warn">FILLS NOW</span> — a buy limit there
+      crosses the spread and executes immediately at the market rather than
+      waiting. Every click asks for confirmation first.
+    </p>
+    <div id="ladder" class="ladder-grid"><div class="muted">loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Hourly candles</h2>
+      <div class="range-picker" id="range-picker"></div>
+    </div>
+    <p class="chart-caption">
+      One-hour bars including extended hours, cached locally and kept for
+      <span id="candle-days">90</span> days. Only the last couple of hours are
+      re-fetched on a refresh — closed bars never change, so they are served
+      from the cache.
+    </p>
+    <div id="candles"><div class="muted">loading…</div></div>
+  </section>
+
+  <section class="panel">
     <h2>Combined</h2>
     <div id="combined" class="combined-grid"><div class="muted">loading…</div></div>
   </section>
@@ -74,7 +102,7 @@
 <div id="modal" class="modal hidden">
   <div class="modal-box">
     <h3 id="modal-title">Confirm</h3>
-    <p id="modal-body"></p>
+    <div id="modal-body"></div>
     <div class="modal-actions">
       <button id="modal-cancel" class="small">Cancel</button>
       <button id="modal-confirm" class="small danger">Confirm</button>

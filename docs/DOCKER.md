@@ -80,9 +80,20 @@ docker compose run --rm -it app schwab-login --login personal
 docker compose run --rm -it app schwab-login --login joint
 ```
 
-The callback URL (`https://127.0.0.1:8182/`) needs nothing listening — you
-copy the redirected URL out of the browser address bar and paste it at the
-prompt. So no port has to be published for this.
+Outside Docker, `schwab-login` catches the redirect itself. In a container it
+cannot: the browser's `127.0.0.1:8182` is the *host*, while the listener would
+bind inside the container. Two ways round it:
+
+```bash
+# (a) publish the port so the host's browser reaches the listener
+docker compose run --rm -it -p 127.0.0.1:8182:8182 app schwab-login --login personal
+
+# (b) skip the listener and paste the redirected URL by hand
+docker compose run --rm -it app schwab-login --login personal --no-listener
+```
+
+Prefer (a). With (b) you are racing Schwab's ~30-second code expiry with a
+copy-and-paste, which is the usual cause of `invalid_grant`.
 
 Tokens land in the volume, so `docker compose down` and rebuilds do not lose
 them.
@@ -114,7 +125,7 @@ Docker Desktop.
 gateway restarts or its session ages out (~24h). Nothing is automated, and no
 IBKR credentials are stored anywhere.
 
-### Option B — IBeam sibling container (`--profile ibkr`)
+### Option B — IBeam sibling container (the default)
 
 ```bash
 # .env
@@ -124,8 +135,12 @@ IBKR_BASE_URL=https://ibeam:5000/v1/api
 ```
 
 ```bash
-docker compose --profile ibkr up -d
+docker compose up -d
 ```
+
+IBeam starts alongside the app. If you chose Option A instead, comment the
+`ibeam` service out of `docker-compose.yml` — two gateways on one IBKR login
+fight over the session and log each other out.
 
 [IBeam](https://github.com/Voyz/ibeam) runs the gateway headlessly and injects
 your credentials into its login page to keep the session alive.
@@ -140,8 +155,9 @@ This is a genuine convenience-versus-exposure trade, and it is yours to make.
 If unattended operation matters more than credential isolation, use it — with
 paper credentials first. Otherwise use Option A.
 
-The `ibeam` service sits behind a compose profile, so it does not start, and
-its variables are not required, unless you explicitly ask for it.
+The `ibeam` service starts with `docker compose up -d`. Its variables are not
+declared as required, so every other compose command still works if you
+comment the service out.
 
 ---
 

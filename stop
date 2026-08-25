@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Shut down what ./start brought up.
+#
+# Deliberately does NOT touch open orders or positions — this stops software,
+# not trades. Anything working at a broker stays working.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
+
+GREEN=$'\033[32m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+STATE="$HERE/var/state"
+PIDFILE="$STATE/dashboard.pid"
+
+step() { printf '\n%s==>%s %s\n' "$GREEN" "$OFF" "$1"; }
+
+# --- dashboard ---------------------------------------------------------------
+step "Dashboard"
+if [ -f "$PIDFILE" ]; then
+    pid="$(cat "$PIDFILE")"
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+            echo "    force-killed (pid $pid)"
+        else
+            echo "    stopped (pid $pid)"
+        fi
+    else
+        echo "    not running"
+    fi
+    rm -f "$PIDFILE"
+else
+    # A dashboard started by ./dash or ./qqq serve has no pidfile of ours.
+    if pgrep -f "trading.cli.*serve" >/dev/null 2>&1; then
+        echo "    ${YELLOW}a dashboard is running that ./start did not launch${OFF}"
+        echo "    ${DIM}stop it with Ctrl-C in its own terminal${OFF}"
+    else
+        echo "    not running"
+    fi
+fi
+
+# --- IBKR gateway ------------------------------------------------------------
+step "IBKR gateway"
+if docker info >/dev/null 2>&1; then
+    if [ -n "$(docker ps -q -f name=qqq-ibeam)" ]; then
+        docker compose stop ibeam >/dev/null 2>&1
+        echo "    stopped"
+    else
+        echo "    not running"
+    fi
+    # The app container is not part of ./start, but stop it if something else
+    # left it up — two dashboards on one set of accounts is a bad surprise.
+    if [ -n "$(docker ps -q -f name=qqq-switch)" ]; then
+        docker compose stop app >/dev/null 2>&1
+        echo "    also stopped the app container"
+    fi
+else
+    echo "    Docker unavailable — nothing to stop"
+fi
+
+printf '\n%sAll stopped.%s %sPositions and open orders are untouched.%s\n\n' \
+    "$GREEN" "$OFF" "$DIM" "$OFF"

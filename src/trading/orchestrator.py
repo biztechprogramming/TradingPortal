@@ -10,11 +10,13 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
 from . import audit as A
 from .audit import AuditLog, new_command_id, setup_logging
 from .backfill import Backfiller
+from .candles import CandleService, CandleStore
 from .brokers import build_brokers, verify_environment
 from .brokers.base import Broker
 from .config import Settings
@@ -29,10 +31,23 @@ from .performance import (
     today_utc,
     trim_series,
 )
-from .errors import ConfirmationRequired, ExecutionLocked, TradingError
+from .errors import (
+    ConfirmationRequired,
+    ExecutionLocked,
+    OrderValidationError,
+    TradingError,
+)
+from .ladder import (
+    LadderExecutor,
+    LadderOrderResult,
+    build_rung_views,
+    rung_key,
+)
 from .locks import ExecutionLock
+from .session import compute_session_range
 from .models import (
     BrokerResult,
+    Quote,
     BrokerSnapshot,
     Command,
     CommandResult,
@@ -60,6 +75,8 @@ class TradingService:
         self._connect_lock = threading.Lock()
         self._connected_once = False
         self.nav = NavLedger(settings.state_dir / "nav_history.jsonl")
+        self.candle_store = CandleStore(settings.state_dir / "candles.db")
+        self.candles = CandleService(settings, self.candle_store)
         self.backfiller = Backfiller(settings, self.nav, self.audit)
         self._nav_recorded: dict[str, str] = {}
 
@@ -163,6 +180,7 @@ class TradingService:
             "brokers": {n: s.to_dict() for n, s in snapshots.items()},
             "combined": self._combine(snapshots),
             "state": self.state.snapshot(),
+            "last_fills": self.last_fills(),
         }
 
     def _combine(self, snapshots: dict[str, BrokerSnapshot]) -> dict[str, Any]:
@@ -297,6 +315,340 @@ class TradingService:
                 entry["error"] = str(exc)
             out["brokers"][name] = entry
         return out
+
+    # --- candles ----------------------------------------------------------
+
+    def candle_series(
+        self, symbol: str, days: int | None = None, refresh: bool = True
+    ) -> dict[str, Any]:
+        """Cached hourly bars for one symbol, refreshing only the recent edge."""
+        # Read-only accounts are perfectly good sources of market data, so
+        # unlike order routing this uses every connected broker.
+        brokers = list(self.brokers.values())
+        return self.candles.series(brokers, symbol, days=days, refresh=refresh)
+
+    def last_fills(self) -> dict[str, dict[str, Any]]:
+        """Most recent fill per broker per symbol, from the command history.
+
+        Walks history newest-first and keeps the first hit for each
+        (broker, symbol) pair, so a symbol that was not touched by the latest
+        command still reports the last time it *was* traded rather than
+        blanking out.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for record in reversed(self.state.data.history):
+            for broker_result in record.get("results", []) or []:
+                broker = broker_result.get("broker")
+                if not broker:
+                    continue
+                bucket = out.setdefault(broker, {})
+                for fill in broker_result.get("fills", []) or []:
+                    symbol = (fill.get("symbol") or "").upper()
+                    if not symbol or symbol in bucket:
+                        continue
+                    if not fill.get("filled_quantity"):
+                        continue
+                    bucket[symbol] = {
+                        "shares": fill.get("filled_quantity"),
+                        "price": fill.get("average_price"),
+                        "side": fill.get("side"),
+                        "at": record.get("finished_at") or record.get("started_at"),
+                        "command": record.get("command"),
+                    }
+        return out
+
+    # --- ladder -----------------------------------------------------------
+
+    def ladder(self) -> dict[str, Any]:
+        """Session high/low and the rung list for each traded symbol.
+
+        Quotes and open orders are read live from one broker each time. The
+        rungs themselves are broker-independent -- they come from the session
+        range -- but the *open orders* shown against them are per account,
+        because that is what tells the operator whether a click will place a
+        new order or re-price an existing one.
+        """
+        out: dict[str, Any] = {
+            "generated_at": time.time(),
+            "enabled": self.settings.ladder_enabled,
+            "levels": self.settings.ladder_levels,
+            "symbols": {},
+            "accounts": {},
+        }
+
+        # One quote per symbol, from the first broker that can supply one.
+        quotes: dict[str, Any] = {}
+        for symbol in self.settings.symbols:
+            entry: dict[str, Any] = {
+                "symbol": symbol,
+                "step": self.settings.ladder_step_for(symbol),
+                "tick": self.settings.ladder_tick_for(symbol),
+                "quote": None,
+                "rungs": [],
+                "error": None,
+            }
+            for broker in self.brokers.values():
+                try:
+                    if not broker.connected:
+                        broker.connect()
+                    quote = broker.get_quote(symbol)
+                except Exception as exc:
+                    entry["error"] = str(exc)
+                    continue
+                quotes[symbol] = quote
+                entry["quote"] = quote.to_dict()
+                entry["error"] = None
+                break
+
+            # Session extremes come from the cached bars, which carry the one
+            # thing a snapshot quote cannot: *when* each extreme happened.
+            # This also keeps the ladder anchored when the quote feed is
+            # unavailable but history still works.
+            try:
+                bars = self.candle_store.bars(
+                    symbol, time.time() - 3 * 86400, time.time()
+                )
+            except Exception as exc:
+                bars = []
+                log.debug("session bars for %s unavailable: %s", symbol, exc)
+            session = compute_session_range(
+                symbol,
+                bars,
+                now=time.time(),
+                quote=quotes.get(symbol),
+                outside_rth=self.settings.candle_outside_rth,
+            )
+            entry["session"] = session.to_dict()
+
+            quote = quotes.get(symbol)
+            if session.complete:
+                # Anchor rungs on the session range we just derived, which may
+                # be richer than the quote's own high/low.
+                anchor_quote = (
+                    replace(quote, day_high=session.day_high,
+                            day_low=session.day_low)
+                    if quote is not None
+                    else Quote(
+                        symbol=symbol,
+                        bid=0.0, ask=0.0,
+                        last=session.high_since_low or session.day_high,
+                        timestamp=time.time(),
+                        day_high=session.day_high,
+                        day_low=session.day_low,
+                    )
+                )
+                entry["rungs"] = [
+                    r.to_dict()
+                    for r in build_rung_views(symbol, anchor_quote, self.settings)
+                ]
+                entry["error"] = None
+            elif not entry["error"]:
+                entry["error"] = (
+                    f"no session high/low for {symbol} yet — neither the live "
+                    "quote nor the cached bars cover the current session, so "
+                    "no rungs can be anchored"
+                )
+            out["symbols"][symbol] = entry
+
+        # Per-account working orders and positions, straight from the broker.
+        for name, broker in self.brokers.items():
+            account: dict[str, Any] = {
+                "broker_type": broker.broker_type,
+                "read_only": broker.read_only,
+                "connected": broker.connected,
+                "display_id": broker.account.display_id if broker.account else None,
+                "open_orders": [],
+                "positions": {},
+                "cash_available": None,
+                "error": None,
+            }
+            try:
+                if not broker.connected:
+                    broker.connect()
+                account["connected"] = broker.connected
+                account["open_orders"] = [
+                    o.to_dict()
+                    for o in broker.get_open_orders_for(set(self.settings.symbols))
+                ]
+                account["positions"] = {
+                    sym: broker.get_position(sym).quantity
+                    if broker.get_position(sym) else 0.0
+                    for sym in self.settings.symbols
+                }
+                account["cash_available"] = broker.get_available_cash().cash_available
+            except Exception as exc:
+                account["error"] = str(exc)
+            out["accounts"][name] = account
+
+        return out
+
+    def place_ladder_order(
+        self,
+        symbol: str,
+        limit_price: float,
+        *,
+        request_id: str | None = None,
+        confirm_token: str | None = None,
+        force: bool = False,
+        source: str = "api",
+    ) -> LadderOrderResult:
+        """Place or re-price one resting BUY limit at ``limit_price``.
+
+        Every rung order requires a confirmation token, in every mode. That is
+        stricter than the LONG/SHORT commands, which only confirm in live
+        mode, and it is deliberate: a ladder is a grid of one-click buttons,
+        so the click itself carries no weight and the confirmation is the
+        only thing standing between a stray tap and an order.
+        """
+        symbol = (symbol or "").upper().strip()
+        command_id = new_command_id()
+        key = rung_key(symbol, limit_price)
+
+        self.audit.record(
+            A.COMMAND_RECEIVED,
+            command_id=command_id,
+            command=key,
+            mode=self.settings.mode.value,
+            source=source,
+            request_id=request_id,
+            force=force,
+        )
+
+        try:
+            self._ladder_preflight(
+                symbol, limit_price, key, request_id, confirm_token,
+                force, command_id,
+            )
+        except TradingError as exc:
+            self.audit.record(
+                A.COMMAND_REJECTED,
+                command_id=command_id,
+                command=key,
+                reason=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise
+
+        result = LadderOrderResult(
+            command_id=command_id,
+            symbol=symbol,
+            limit_price=limit_price,
+            mode=self.settings.mode,
+        )
+
+        with self.lock.acquire(owner=f"{source}:{key}:{command_id}"):
+            self.audit.record(A.LOCK_ACQUIRED, command_id=command_id, command=key)
+            self.state.record_command(key, command_id, request_id)
+            targets = self.tradable_brokers
+            self.audit.record(
+                A.COMMAND_STARTED,
+                command_id=command_id,
+                command=key,
+                brokers=list(targets),
+                read_only_skipped=[
+                    n for n, b in self.brokers.items() if b.read_only
+                ],
+            )
+
+            def run_one(broker: Broker) -> Any:
+                return LadderExecutor(
+                    self.settings, self.audit, command_id
+                ).place(broker, symbol, limit_price)
+
+            if targets:
+                with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+                    futures = {
+                        name: pool.submit(run_one, broker)
+                        for name, broker in targets.items()
+                    }
+                    for name, future in futures.items():
+                        try:
+                            result.results.append(future.result())
+                        except Exception as exc:
+                            log.exception("%s: ladder executor crashed", name)
+                            from .ladder import RungOrderResult
+
+                            result.results.append(
+                                RungOrderResult(
+                                    broker=name,
+                                    ok=False,
+                                    mode=self.settings.mode,
+                                    symbol=symbol,
+                                    limit_price=limit_price,
+                                    errors=[f"{type(exc).__name__}: {exc}"],
+                                    needs_attention=True,
+                                )
+                            )
+
+        result.finished_at = time.time()
+        payload = result.to_dict()
+        self.state.record_result(payload)
+        self.audit.record(
+            A.COMMAND_FINISHED,
+            command_id=command_id,
+            command=key,
+            status=result.status,
+            result=payload,
+        )
+        return result
+
+    def _ladder_preflight(
+        self,
+        symbol: str,
+        limit_price: float,
+        key: str,
+        request_id: str | None,
+        confirm_token: str | None,
+        force: bool,
+        command_id: str,
+    ) -> None:
+        if not self.settings.ladder_enabled:
+            raise OrderValidationError(
+                "the price ladder is disabled; set LADDER_ENABLED=true to use it"
+            )
+        if symbol not in {s.upper() for s in self.settings.symbols}:
+            raise OrderValidationError(
+                f"symbol {symbol!r} is not tradable by this system; only "
+                f"{sorted(self.settings.symbols)} are permitted"
+            )
+        if limit_price is None or limit_price <= 0:
+            raise OrderValidationError(
+                f"limit price must be positive, got {limit_price!r}"
+            )
+
+        self.state.check_mismatch_clear(self.settings.require_mismatch_ack)
+        self.state.check_daily_limit(self.settings.max_daily_commands)
+        # Keyed on symbol AND price, so two different rungs never suppress
+        # each other but a double-tap on one rung does.
+        self.state.check_duplicate(
+            key,
+            self.settings.duplicate_command_window_seconds,
+            request_id=request_id,
+            force=force,
+        )
+
+        if not confirm_token or not self.state.consume_confirmation(
+            confirm_token, key
+        ):
+            pending = self.state.issue_confirmation(
+                key, self.settings.confirmation_ttl_seconds
+            )
+            self.audit.record(
+                A.CONFIRMATION_ISSUED,
+                command_id=command_id,
+                command=key,
+                expires_at=pending.expires_at,
+            )
+            raise ConfirmationRequired(
+                f"BUY {symbol} at ${limit_price:,.4f}. Re-send with this "
+                f"confirmation token within "
+                f"{self.settings.confirmation_ttl_seconds:.0f}s to proceed.",
+                pending.token,
+                pending.expires_at,
+            )
+        self.audit.record(
+            A.CONFIRMATION_ACCEPTED, command_id=command_id, command=key
+        )
 
     # --- command execution ------------------------------------------------
 

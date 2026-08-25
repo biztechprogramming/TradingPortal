@@ -153,7 +153,7 @@ th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: upp
 .alert-ok    { background: #10301f; border-color: var(--green); color: #ccf1dd; }
 .alert button { margin-left: 10px; }
 
-.events { max-height: 320px; overflow-y: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.events { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .event { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid #1d232b; }
 .event-ts { color: var(--muted); white-space: nowrap; }
 .event-name { color: var(--blue); white-space: nowrap; min-width: 175px; }
@@ -287,3 +287,109 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .dot-off { background: var(--red); }
 .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- working orders ----------------------------------------------------- */
+.num { font-variant-numeric: tabular-nums; text-align: right; }
+.order-row td { font-variant-numeric: tabular-nums; }
+
+/* --- price ladder ------------------------------------------------------- */
+.ladder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+.ladder-card { margin: 0; }
+.ladder-working { margin: 10px 0 0; font-size: 12.5px; }
+
+.rungs {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rung {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.rung:hover:not(:disabled) { border-color: var(--blue); background: #232b35; }
+.rung:disabled { opacity: .45; cursor: not-allowed; }
+.rung-price {
+  font-size: 16px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.rung-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+}
+.rung-badges { display: flex; gap: 5px; }
+
+/* A rung that crosses the spread is not the same action as one that rests,
+   so it does not look the same either. */
+.rung-marketable { border-left: 3px solid var(--amber); }
+.rung-working    { border-color: var(--green); background: #14251c; }
+
+.pill-warn   { background: var(--amber); color: #1a1000; }
+.pill-anchor { background: var(--blue); color: #04121f; }
+
+.confirm-warn {
+  background: #3a2c10;
+  border: 1px solid var(--amber);
+  color: #ffe8bf;
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+.modal-box #modal-body p { margin: 0 0 10px; }
+
+/* --- account sub-sections ----------------------------------------------- */
+.sub-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); font-weight: 600;
+  margin: 16px 0 6px; padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.sub-head .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.sub-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sub-table th { padding: 4px 6px; }
+.sub-table td { padding: 5px 6px; border-top: 1px solid var(--line); }
+.sub-table td.num, .sub-table th.num { font-variant-numeric: tabular-nums; text-align: right; }
+.sub-note { font-size: 11.5px; color: var(--muted); margin: 8px 0 0; }
+
+/* --- candles ------------------------------------------------------------ */
+.range-picker { display: flex; gap: 4px; }
+.range-btn { padding: 4px 10px; font-size: 12px; }
+.range-on { background: var(--blue); border-color: var(--blue); color: #04121f; }
+
+.candle-block + .candle-block { margin-top: 22px; }
+.candle-figure { position: relative; margin: 0; }
+.candle-figure svg { width: 100%; height: 300px; display: block; }
+.candle-hit { cursor: crosshair; }
+
+/* Up and down are separated by fill, not by hue alone -- the hollow body is
+   the redundant channel for anyone who cannot separate the two colours. */
+.wick { stroke-width: 1; }
+.body { stroke-width: 1; }
+.candle-up.wick   { stroke: var(--green); }
+.candle-up.body   { fill: none; stroke: var(--green); }
+.candle-down.wick { stroke: var(--red); }
+.candle-down.body { fill: var(--red); stroke: var(--red); }
+.candle-tip .tip-row { display: flex; justify-content: space-between; gap: 14px; }
+
+/* --- session structure -------------------------------------------------- */
+.session-kv .num { display: inline-flex; align-items: baseline; gap: 6px; }
+.session-at { font-size: 11.5px; font-variant-numeric: normal; }

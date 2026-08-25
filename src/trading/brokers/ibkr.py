@@ -35,6 +35,7 @@ Behaviours this adapter compensates for:
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import time
@@ -54,6 +55,7 @@ from ..errors import (
 )
 from ..models import (
     Account,
+    Bar,
     Balances,
     Order,
     OrderState,
@@ -78,13 +80,15 @@ def _pa_date(raw: Any) -> str | None:
 
 # Snapshot field ids.
 F_LAST = "31"
+F_HIGH = "70"
+F_LOW = "71"
 F_BID = "84"
 F_ASK_SIZE = "85"
 F_ASK = "86"
 F_BID_SIZE = "88"
 F_AVAILABILITY = "6509"
-SNAPSHOT_FIELDS = ",".join([F_LAST, F_BID, F_ASK_SIZE, F_ASK, F_BID_SIZE,
-                            F_AVAILABILITY])
+SNAPSHOT_FIELDS = ",".join([F_LAST, F_HIGH, F_LOW, F_BID, F_ASK_SIZE, F_ASK,
+                            F_BID_SIZE, F_AVAILABILITY])
 
 STATUS_MAP: dict[str, OrderState] = {
     "FILLED": OrderState.FILLED,
@@ -539,6 +543,62 @@ class IBKRBroker(Broker):
             )
         return quote
 
+    def get_price_bars(
+        self,
+        symbol: str,
+        start: float,
+        end: float,
+        *,
+        bar_size: str = "1h",
+        outside_rth: bool = True,
+    ) -> list[Bar] | None:
+        """Historical candles from ``/iserver/marketdata/history``.
+
+        IBKR takes a *period* counted back from now rather than a start/end
+        pair, so the requested window is converted into the smallest period
+        that covers it and the surplus is trimmed off afterwards.
+        """
+        self.tickle()
+        if not self._iserver_primed:
+            self.get_accounts()
+        conid = self.resolve_conid(symbol)
+
+        span_days = max(1, math.ceil((time.time() - start) / 86400.0))
+        params = {
+            "conid": str(conid),
+            "period": f"{span_days}d",
+            "bar": bar_size,
+            "outsideRth": "true" if outside_rth else "false",
+        }
+        data = self._request("GET", "/iserver/marketdata/history", params=params)
+        if not isinstance(data, dict):
+            return []
+
+        bars: list[Bar] = []
+        for raw in data.get("data") or []:
+            try:
+                ts = int(float(raw["t"]) / 1000.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ts < start or ts > end:
+                continue
+            try:
+                bars.append(
+                    Bar(
+                        symbol=symbol.upper(),
+                        ts=ts,
+                        open=float(raw.get("o", 0) or 0),
+                        high=float(raw.get("h", 0) or 0),
+                        low=float(raw.get("l", 0) or 0),
+                        close=float(raw.get("c", 0) or 0),
+                        volume=float(raw.get("v", 0) or 0),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        bars.sort(key=lambda b: b.ts)
+        return bars
+
     def unsubscribe_all(self) -> None:
         try:
             self._request("GET", "/iserver/marketdata/unsubscribeall", retries=0)
@@ -767,6 +827,11 @@ def _parse_snapshot(symbol: str, raw: dict[str, Any]) -> Quote:
     ask, halted_a = _clean_price(raw.get(F_ASK))
     last, halted_l = _clean_price(raw.get(F_LAST))
 
+    # Not present before the session's first trade, and not required for
+    # trading -- so unlike bid/ask these never make a quote invalid.
+    day_high, _ = _clean_price(raw.get(F_HIGH))
+    day_low, _ = _clean_price(raw.get(F_LOW))
+
     availability = str(raw.get(F_AVAILABILITY, "") or "").upper()
     # Availability letters: R=realtime, D=delayed, Z=frozen, Y=frozen delayed.
     delayed = availability.startswith("D") or availability.startswith("Y")
@@ -791,6 +856,8 @@ def _parse_snapshot(symbol: str, raw: dict[str, Any]) -> Quote:
         delayed=delayed,
         halted=halted_b or halted_a or halted_l,
         source="ibkr",
+        day_high=day_high,
+        day_low=day_low,
     )
 
 

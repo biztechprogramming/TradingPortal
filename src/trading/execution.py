@@ -26,6 +26,7 @@ from .errors import (
 )
 from .models import Balances, Fill, Order, OrderState, Quote, Side
 from .pricing import compute_limit_price, should_reprice, validate_quote
+from .sizing import lot_floor
 from .validation import validate_order
 
 log = logging.getLogger("trading.execution")
@@ -467,7 +468,12 @@ class ExecutionEngine:
         left = req.budget - spent
         if left <= 0 or limit_price <= 0:
             return 0
-        return min(state.remaining, int(left // limit_price))
+        # Lot-align what the budget affords, then take the smaller of that and
+        # what is actually left. Aligning after the min() would instead round
+        # away the tail of a partially-filled leg, which is the broker's share
+        # count to finish, not ours to reshape.
+        affordable = lot_floor(left // limit_price, self.settings)
+        return min(state.remaining, affordable)
 
     def _ensure_closed(
         self, broker: Broker, order: Order, state: _LegState

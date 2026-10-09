@@ -24,6 +24,20 @@ DEFAULT_LADDER_STEPS: dict[str, float] = {"QQQ": 0.10, "PSQ": 0.005}
 #: Fallback spacing for a symbol with no entry above and no explicit override.
 FALLBACK_LADDER_STEP = 0.01
 
+#: Hard-guard distance per symbol, in ticks. This is the number that decides
+#: the worst price a leg may reach, so it is expressed in ticks rather than
+#: basis points: 50 bps is $0.14 on PSQ and $3.00 on QQQ, which makes a single
+#: bps setting meaningless across a pair whose prices differ by 20x.
+#: Override with ``MAX_SLIPPAGE_TICKS_<SYMBOL>``.
+DEFAULT_MAX_SLIPPAGE_TICKS: dict[str, float] = {"QQQ": 25.0, "PSQ": 10.0}
+FALLBACK_MAX_SLIPPAGE_TICKS = 25.0
+
+#: Widest spread, in ticks, we will price an order against. QQQ is penny-wide
+#: essentially all session, so anything past a nickel is a dislocation rather
+#: than a normal book. Override with ``MAX_SPREAD_TICKS_<SYMBOL>``.
+DEFAULT_MAX_SPREAD_TICKS: dict[str, float] = {"QQQ": 5.0, "PSQ": 10.0}
+FALLBACK_MAX_SPREAD_TICKS = 10.0
+
 #: Substrings that mark an environment variable as secret. Used by the
 #: redactor so a future variable named ``*_TOKEN`` is protected by default.
 SECRET_MARKERS = (
@@ -140,16 +154,46 @@ class Settings:
     max_order_notional_dollars: float = 0.0   # 0 = no cap
     max_shares_per_order: int = 0             # 0 = no cap
     min_order_shares: int = 1
+    #: Orders are sized in whole lots of this many shares. 1 disables lotting.
+    share_lot_size: int = 10
+    #: Target band for how much of available cash a buy deploys, in percent.
+    #: The max is a real ceiling; the min is a reporting threshold, because lot
+    #: rounding on a high-priced symbol cannot always reach it.
+    target_cash_min_pct: float = 95.0
+    target_cash_max_pct: float = 98.0
     estimated_fee_fixed: float = 0.0
     estimated_fee_per_share: float = 0.0
 
     # --- limit pricing ----------------------------------------------------
+    #: How far through the touch a marketable limit is posted, in ticks. One
+    #: tick covers the quote-to-arrival latency on a penny-wide book, which is
+    #: the whole reason to cross at all.
+    buy_offset_ticks: float = 1.0
+    sell_offset_ticks: float = 1.0
+    #: The offset is also allowed to scale with the spread, so a thin book gets
+    #: more cushion without loosening anything on a normal one. The applied
+    #: offset is ``max(offset_ticks * tick, spread_multiple * spread)``.
+    spread_multiple: float = 1.0
+    #: Added to the offset on each cancel/replace, in ticks.
+    reprice_step_ticks: float = 1.0
+    #: Hard guard, in ticks, from the anchor price. 0 disables the tick guard
+    #: and leaves ``max_slippage_bps`` as the only boundary.
+    max_slippage_ticks: float = FALLBACK_MAX_SLIPPAGE_TICKS
+    #: Widest tradable spread in ticks. 0 disables, leaving ``max_spread_bps``.
+    max_spread_ticks: float = FALLBACK_MAX_SPREAD_TICKS
+    #: Per-symbol overrides for the two guards above.
+    max_slippage_ticks_by_symbol: dict[str, float] = field(default_factory=dict)
+    max_spread_ticks_by_symbol: dict[str, float] = field(default_factory=dict)
+    limit_offset_ticks: dict[str, float] = field(default_factory=dict)
+    #: Outer cap, kept as a percentage-of-price backstop. Whichever of this and
+    #: the tick guard is *tighter* wins, so a mistyped tick count on a symbol
+    #: at any price still cannot authorise an unbounded chase.
     buy_slippage_bps: float = 10.0
     sell_slippage_bps: float = 10.0
     max_slippage_bps: float = 50.0
     reprice_step_bps: float = 5.0
     max_spread_bps: float = 75.0
-    max_quote_age_seconds: float = 10.0
+    max_quote_age_seconds: float = 2.0
     tick_size: float = 0.01
 
     # --- ladder -----------------------------------------------------------
@@ -239,6 +283,47 @@ class Settings:
     def slippage_bps(self, side: str) -> float:
         return self.buy_slippage_bps if side == "BUY" else self.sell_slippage_bps
 
+    def offset_ticks_for(self, symbol: str, side: str) -> float:
+        """Base cushion beyond the touch, in ticks, for one symbol and side."""
+        sym = (symbol or "").upper()
+        if sym in self.limit_offset_ticks:
+            return self.limit_offset_ticks[sym]
+        return self.buy_offset_ticks if side == "BUY" else self.sell_offset_ticks
+
+    def max_slippage_ticks_for(self, symbol: str) -> float:
+        sym = (symbol or "").upper()
+        if sym in self.max_slippage_ticks_by_symbol:
+            return self.max_slippage_ticks_by_symbol[sym]
+        return self.max_slippage_ticks
+
+    def max_spread_ticks_for(self, symbol: str) -> float:
+        sym = (symbol or "").upper()
+        if sym in self.max_spread_ticks_by_symbol:
+            return self.max_spread_ticks_by_symbol[sym]
+        return self.max_spread_ticks
+
+    def guard_distance_for(self, symbol: str, anchor_price: float) -> float:
+        """Dollars from the anchor the limit may never cross.
+
+        The tighter of the tick guard and the bps guard wins. Two units for one
+        boundary is deliberate: ticks are the unit that actually means
+        something on a given book, and bps is a price-proportional backstop so
+        a fat-fingered tick count cannot authorise an unbounded chase.
+        """
+        bps_distance = abs(anchor_price) * self.max_slippage_bps / 10_000.0
+        ticks = self.max_slippage_ticks_for(symbol)
+        if ticks <= 0:
+            return bps_distance
+        return min(bps_distance, ticks * self.tick_size)
+
+    def max_spread_dollars_for(self, symbol: str, mid_price: float) -> float:
+        """Widest spread we will price against, in dollars. Tighter rule wins."""
+        bps_distance = abs(mid_price) * self.max_spread_bps / 10_000.0
+        ticks = self.max_spread_ticks_for(symbol)
+        if ticks <= 0:
+            return bps_distance
+        return min(bps_distance, ticks * self.tick_size)
+
     def ladder_step_for(self, symbol: str) -> float:
         """Rung spacing for one symbol, in dollars."""
         sym = (symbol or "").upper()
@@ -303,6 +388,19 @@ class Settings:
             "allow_margin": self.allow_margin,
             "max_order_notional_dollars": self.max_order_notional_dollars,
             "max_shares_per_order": self.max_shares_per_order,
+            "share_lot_size": self.share_lot_size,
+            "target_cash_min_pct": self.target_cash_min_pct,
+            "target_cash_max_pct": self.target_cash_max_pct,
+            "buy_offset_ticks": self.buy_offset_ticks,
+            "sell_offset_ticks": self.sell_offset_ticks,
+            "spread_multiple": self.spread_multiple,
+            "reprice_step_ticks": self.reprice_step_ticks,
+            "max_slippage_ticks": {
+                sym: self.max_slippage_ticks_for(sym) for sym in self.symbols
+            },
+            "max_spread_ticks": {
+                sym: self.max_spread_ticks_for(sym) for sym in self.symbols
+            },
             "buy_slippage_bps": self.buy_slippage_bps,
             "sell_slippage_bps": self.sell_slippage_bps,
             "max_slippage_bps": self.max_slippage_bps,
@@ -427,6 +525,28 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         if tick_raw is not None:
             ladder_ticks[sym] = _float(f"LADDER_TICK_{sym}", 0.0)
 
+    def _per_symbol(prefix: str) -> dict[str, float]:
+        """Collect ``<PREFIX>_<SYMBOL>`` overrides for the tradable pair."""
+        out: dict[str, float] = {}
+        for sym in (long_sym, short_sym):
+            if _env(f"{prefix}_{sym}") is not None:
+                out[sym] = _float(f"{prefix}_{sym}", 0.0)
+        return out
+
+    def _seeded(prefix: str, defaults: dict[str, float]) -> dict[str, float]:
+        """Per-symbol overrides, falling back to the per-symbol defaults table.
+
+        Precedence is ``<PREFIX>_<SYMBOL>`` > ``<PREFIX>`` > the table. Setting
+        the plain variable therefore means "this number, for both symbols" and
+        is not silently shadowed by a default the user never asked for.
+        """
+        out = _per_symbol(prefix)
+        if _env(prefix) is None:
+            for sym in (long_sym, short_sym):
+                if sym in defaults:
+                    out.setdefault(sym, defaults[sym])
+        return out
+
     trading_accounts = _csv("TRADING_ACCOUNTS")
     # Back-compat: the original single-account variable still pins Schwab.
     legacy_schwab = _env("SCHWAB_ACCOUNT_NUMBER")
@@ -465,18 +585,34 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         max_order_notional_dollars=_float("MAX_ORDER_NOTIONAL_DOLLARS", 0.0),
         max_shares_per_order=_int("MAX_SHARES_PER_ORDER", 0),
         min_order_shares=_int("MIN_ORDER_SHARES", 1),
+        share_lot_size=_int("SHARE_LOT_SIZE", 10),
+        target_cash_min_pct=_float("TARGET_CASH_MIN_PCT", 95.0),
+        target_cash_max_pct=_float("TARGET_CASH_MAX_PCT", 98.0),
         estimated_fee_fixed=_float("ESTIMATED_FEE_FIXED", 0.0),
         estimated_fee_per_share=_float("ESTIMATED_FEE_PER_SHARE", 0.0),
+        buy_offset_ticks=_float("BUY_OFFSET_TICKS", 1.0),
+        sell_offset_ticks=_float("SELL_OFFSET_TICKS", 1.0),
+        spread_multiple=_float("SPREAD_MULTIPLE", 1.0),
+        reprice_step_ticks=_float("REPRICE_STEP_TICKS", 1.0),
+        max_slippage_ticks=_float("MAX_SLIPPAGE_TICKS", FALLBACK_MAX_SLIPPAGE_TICKS),
+        max_spread_ticks=_float("MAX_SPREAD_TICKS", FALLBACK_MAX_SPREAD_TICKS),
+        limit_offset_ticks=_per_symbol("LIMIT_OFFSET_TICKS"),
+        max_slippage_ticks_by_symbol=_seeded(
+            "MAX_SLIPPAGE_TICKS", DEFAULT_MAX_SLIPPAGE_TICKS
+        ),
+        max_spread_ticks_by_symbol=_seeded(
+            "MAX_SPREAD_TICKS", DEFAULT_MAX_SPREAD_TICKS
+        ),
         buy_slippage_bps=_resolve_bps("BUY_SLIPPAGE_PCT", "BUY_SLIPPAGE_BPS", 10.0),
         sell_slippage_bps=_resolve_bps("SELL_SLIPPAGE_PCT", "SELL_SLIPPAGE_BPS", 10.0),
         max_slippage_bps=_resolve_bps("MAX_SLIPPAGE_PCT", "MAX_SLIPPAGE_BPS", 50.0),
         reprice_step_bps=_resolve_bps("REPRICE_STEP_PCT", "REPRICE_STEP_BPS", 5.0),
         max_spread_bps=_resolve_bps("MAX_SPREAD_PCT", "MAX_SPREAD_BPS", 75.0),
-        max_quote_age_seconds=_float("MAX_QUOTE_AGE_SECONDS", 10.0),
+        max_quote_age_seconds=_float("MAX_QUOTE_AGE_SECONDS", 2.0),
         tick_size=_float("TICK_SIZE", 0.01),
         order_fill_timeout_seconds=_float("ORDER_FILL_TIMEOUT_SECONDS", 90.0),
         order_poll_interval_seconds=_float("ORDER_POLL_INTERVAL_SECONDS", 1.0),
-        reprice_interval_seconds=_float("REPRICE_INTERVAL_SECONDS", 5.0),
+        reprice_interval_seconds=_float("REPRICE_INTERVAL_SECONDS", 1.0),
         max_reprice_attempts=_int("MAX_REPRICE_ATTEMPTS", 5),
         cancel_confirm_timeout_seconds=_float("CANCEL_CONFIRM_TIMEOUT_SECONDS", 15.0),
         settlement_wait_seconds=_float("SETTLEMENT_WAIT_SECONDS", 5.0),
@@ -545,8 +681,49 @@ def validate_settings(s: Settings) -> None:
         )
     if s.tick_size <= 0:
         raise ConfigError("TICK_SIZE must be > 0")
+    if s.spread_multiple < 0:
+        raise ConfigError("SPREAD_MULTIPLE must be >= 0")
+    if s.reprice_step_ticks < 0:
+        raise ConfigError("REPRICE_STEP_TICKS must be >= 0")
+    for name, value in (
+        ("BUY_OFFSET_TICKS", s.buy_offset_ticks),
+        ("SELL_OFFSET_TICKS", s.sell_offset_ticks),
+    ):
+        if value < 0:
+            raise ConfigError(f"{name} must be >= 0")
+    for sym in s.symbols:
+        if s.offset_ticks_for(sym, "BUY") < 0 or s.offset_ticks_for(sym, "SELL") < 0:
+            raise ConfigError(f"LIMIT_OFFSET_TICKS_{sym} must be >= 0")
+        slip_ticks = s.max_slippage_ticks_for(sym)
+        if slip_ticks < 0:
+            raise ConfigError(f"MAX_SLIPPAGE_TICKS_{sym} must be >= 0")
+        # A guard tighter than the working offset would clamp every order back
+        # to the touch on its first attempt, silently disabling repricing.
+        if 0 < slip_ticks < max(
+            s.offset_ticks_for(sym, "BUY"), s.offset_ticks_for(sym, "SELL")
+        ):
+            raise ConfigError(
+                f"MAX_SLIPPAGE_TICKS_{sym}={slip_ticks:g} is tighter than the "
+                "working offset; the hard guard cannot be narrower than the "
+                "cushion it is meant to bound."
+            )
+        if s.max_spread_ticks_for(sym) < 0:
+            raise ConfigError(f"MAX_SPREAD_TICKS_{sym} must be >= 0")
+        if s.max_slippage_ticks_for(sym) > 1000:
+            raise ConfigError(
+                f"MAX_SLIPPAGE_TICKS_{sym} above 1000 ticks is refused as a "
+                "fat-finger guard"
+            )
     if s.min_order_shares < 1:
         raise ConfigError("MIN_ORDER_SHARES must be >= 1")
+    if s.share_lot_size < 1:
+        raise ConfigError("SHARE_LOT_SIZE must be >= 1")
+    if not 0 < s.target_cash_max_pct <= 100:
+        raise ConfigError("TARGET_CASH_MAX_PCT must be > 0 and <= 100")
+    if not 0 < s.target_cash_min_pct <= s.target_cash_max_pct:
+        raise ConfigError(
+            "TARGET_CASH_MIN_PCT must be > 0 and <= TARGET_CASH_MAX_PCT"
+        )
     if s.order_poll_interval_seconds <= 0:
         raise ConfigError("ORDER_POLL_INTERVAL_SECONDS must be > 0")
     if s.max_reprice_attempts < 0:

@@ -53,7 +53,7 @@ from .errors import (
 )
 from .models import Balances, Order, Quote, Side, TradingMode
 from .pricing import validate_quote
-from .sizing import calculate_quantity, spendable_cash
+from .sizing import calculate_quantity
 from .validation import check_market_hours, validate_order
 
 log = logging.getLogger("trading.ladder")
@@ -492,10 +492,11 @@ class LadderExecutor:
         )
 
         if sizing.quantity < self.settings.min_order_shares:
+            why = f" [{'; '.join(sizing.caps_applied)}]" if sizing.caps_applied else ""
             result.errors.append(
                 f"insufficient funds: ${balances.cash_available:,.2f} available, "
                 f"${self.settings.cash_buffer_dollars:,.2f} buffer, {symbol} "
-                f"limit ${price:,.4f} -> {sizing.quantity} shares"
+                f"limit ${price:,.4f} -> {sizing.quantity} shares{why}"
             )
             return
 
@@ -661,17 +662,13 @@ class LadderExecutor:
     def _affordable(
         self, order: Order, price: float, balances: Balances
     ) -> int:
-        """Shares purchasable at ``price`` once the old order releases its cash."""
+        """Shares purchasable at ``price`` once the old order releases its cash.
+
+        This defers to :func:`calculate_quantity` rather than repeating the
+        arithmetic, so a resized rung obeys the same cash-target ceiling and
+        lot size as the placement that created it.
+        """
         if price <= 0:
             return 0
         budget = self._budget_balances(order, balances)
-        available = spendable_cash(budget, self.settings)
-        usable = (
-            available
-            - self.settings.cash_buffer_dollars
-            - self.settings.estimated_fee_fixed
-        )
-        if usable <= 0:
-            return 0
-        per_share = price + self.settings.estimated_fee_per_share
-        return max(0, int(math.floor(usable / per_share)))
+        return calculate_quantity(budget, price, self.settings).quantity

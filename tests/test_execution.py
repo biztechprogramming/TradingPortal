@@ -96,21 +96,21 @@ def test_rejected_order_surfaces_as_an_error(settings, tmp_path):
 def test_price_moving_up_triggers_a_reprice(settings, tmp_path):
     """Market runs away after submission, we chase it once, and it fills."""
     s = make_settings(
-        tmp_path, buy_slippage_bps=1, sell_slippage_bps=1, max_slippage_bps=60,
-        reprice_step_bps=20, reprice_interval_seconds=0.0,
+        tmp_path, buy_offset_ticks=1, sell_offset_ticks=1, spread_multiple=0.0,
+        reprice_step_ticks=1, reprice_interval_seconds=0.0,
         max_reprice_attempts=1,
         order_fill_timeout_seconds=2.0, order_poll_interval_seconds=0.001,
     )
-    # Initial limit ~500.09; the offer jumps to 500.64, out of reach.
-    broker = make_rising_broker(s, ("QQQ", 500.60, 500.64), cash=100_000)
+    # Initial limit 500.05; the offer jumps a dime to 500.14, out of reach.
+    broker = make_rising_broker(s, ("QQQ", 500.10, 500.14), cash=100_000)
 
     fill = engine(s, tmp_path).execute_leg(
         broker,
-        LegRequest("QQQ", Side.BUY, 5, budget=5 * 520.0,
+        LegRequest("QQQ", Side.BUY, 10, budget=10 * 520.0,
                    balances=Balances(100_000, 100_000)),
     )
     assert fill.complete
-    assert fill.filled_quantity == 5
+    assert fill.filled_quantity == 10
     assert fill.reprice_count >= 1
     assert broker.replaced_orders or len(broker.submitted_orders) > 1
 
@@ -118,11 +118,11 @@ def test_price_moving_up_triggers_a_reprice(settings, tmp_path):
 def test_reprice_stops_at_the_hard_slippage_guard(settings, tmp_path):
     """A runaway market must abort, not be chased indefinitely."""
     s = make_settings(
-        tmp_path, buy_slippage_bps=1, sell_slippage_bps=1, max_slippage_bps=10,
-        reprice_interval_seconds=0.0, order_fill_timeout_seconds=1.0,
-        order_poll_interval_seconds=0.001,
+        tmp_path, buy_offset_ticks=1, sell_offset_ticks=1,
+        max_slippage_ticks=25, reprice_interval_seconds=0.0,
+        order_fill_timeout_seconds=1.0, order_poll_interval_seconds=0.001,
     )
-    # Anchor 500.04, guard 500.54; the market gaps 2% away to 510.04.
+    # Anchor 500.04, guard 500.29; the market gaps 2% away to 510.04.
     broker = make_rising_broker(s, ("QQQ", 510.00, 510.04), cash=1_000_000)
 
     with pytest.raises(MaxSlippageExceeded, match="Aborting"):
@@ -138,22 +138,25 @@ def test_reprice_stops_at_the_hard_slippage_guard(settings, tmp_path):
 def test_reprice_shrinks_the_order_rather_than_overspending(settings, tmp_path):
     """A higher limit must shrink the order, never breach the cash budget."""
     s = make_settings(
-        tmp_path, buy_slippage_bps=1, sell_slippage_bps=1, max_slippage_bps=100,
-        reprice_step_bps=50, reprice_interval_seconds=0.0,
+        tmp_path, buy_offset_ticks=1, sell_offset_ticks=1, spread_multiple=1.0,
+        reprice_step_ticks=1, reprice_interval_seconds=0.0,
         order_fill_timeout_seconds=1.0, order_poll_interval_seconds=0.001,
         cash_buffer_dollars=0,
     )
-    # Exactly enough for 10 shares at the first limit and not a cent more.
-    broker = make_rising_broker(s, ("QQQ", 500.60, 500.64), cash=5_005.00)
+    # Barely enough for 20 shares at the first limit (500.08); once the
+    # reprice lifts it to 500.18 only one whole lot still fits.
+    broker = make_rising_broker(s, ("QQQ", 500.10, 500.14), cash=10_002.00)
 
     fill = engine(s, tmp_path).execute_leg(
         broker,
-        LegRequest("QQQ", Side.BUY, 10, budget=5_005.00,
-                   balances=Balances(5_005.00, 5_005.00)),
+        LegRequest("QQQ", Side.BUY, 20, budget=10_002.00,
+                   balances=Balances(10_002.00, 10_002.00)),
     )
-    # Fewer shares than requested, bought without exceeding the budget.
-    assert fill.filled_quantity == 9
-    assert fill.notional <= 5_005.00
+    # Fewer shares than requested, bought without exceeding the budget, and
+    # still a whole lot -- the shrink must not produce a ragged 19.
+    assert fill.filled_quantity == 10
+    assert fill.filled_quantity % 10 == 0
+    assert fill.notional <= 10_002.00
     assert any("reduced remaining quantity" in n for n in fill.notes)
     assert broker.get_available_cash().cash_available >= 0
 

@@ -123,12 +123,12 @@ def test_partial_fill_on_a_switch_flags_an_intermediate_state(settings, tmp_path
 
 def test_price_moving_during_execution_still_completes(settings, tmp_path):
     s = make_settings(
-        tmp_path, buy_slippage_bps=2, sell_slippage_bps=2, max_slippage_bps=80,
-        reprice_step_bps=25, reprice_interval_seconds=0.0,
+        tmp_path, buy_offset_ticks=1, sell_offset_ticks=1,
+        reprice_step_ticks=1, reprice_interval_seconds=0.0,
         max_reprice_attempts=2, order_poll_interval_seconds=0.001,
         order_fill_timeout_seconds=2.0,
     )
-    broker = make_rising_broker(s, ("QQQ", 500.80, 500.84), cash=20_000)
+    broker = make_rising_broker(s, ("QQQ", 500.10, 500.14), cash=20_000)
     result = run(s, tmp_path, broker, Command.GO_LONG)
 
     assert result.ok, result.errors
@@ -144,7 +144,7 @@ def test_quote_failure_during_reprice_does_not_abandon_the_order(
         tmp_path, reprice_interval_seconds=0.0, order_poll_interval_seconds=0.001,
         order_fill_timeout_seconds=1.0, max_quote_age_seconds=5,
     )
-    broker = make_rising_broker(s, ("QQQ", 500.60, 500.64), cash=20_000,
+    broker = make_rising_broker(s, ("QQQ", 500.10, 500.14), cash=20_000,
                                 polls_before_fill=3)
 
     calls = {"n": 0}
@@ -155,9 +155,9 @@ def test_quote_failure_during_reprice_does_not_abandon_the_order(
         # reprice — that is the one we make stale.
         calls["n"] += 1
         if calls["n"] == 3:
-            broker.set_quote(symbol, 500.60, 500.64, age=999)
+            broker.set_quote(symbol, 500.10, 500.14, age=999)
             quote = original(symbol)
-            broker.set_quote(symbol, 500.60, 500.64)
+            broker.set_quote(symbol, 500.10, 500.14)
             return quote
         return original(symbol)
 

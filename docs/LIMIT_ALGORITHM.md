@@ -19,9 +19,9 @@ failure aborts the whole command — no order is sent.
 | Halted | the security is halted | — |
 | Complete | bid or ask is missing, zero, negative, or not finite | — |
 | Not crossed | `bid > ask` | — |
-| Fresh | `now - quote_time > MAX_QUOTE_AGE_SECONDS` | default 10 s |
+| Fresh | `now - quote_time > MAX_QUOTE_AGE_SECONDS` | default 2 s |
 | Clock sane | quote timestamp is >30 s in the future | — |
-| Tight enough | `spread_bps > MAX_SPREAD_BPS` | default 75 bps |
+| Tight enough | spread exceeds `MAX_SPREAD_TICKS` **or** `MAX_SPREAD_BPS` | QQQ 5 ticks, PSQ 10; 75 bps |
 
 Two design decisions worth calling out:
 
@@ -31,8 +31,10 @@ Two design decisions worth calling out:
   falling back to "now" would make every stale quote look fresh and silently
   defeat this check.
 - **The spread guard exists because a marketable limit is at its worst when
-  the book is thin.** Crossing a 5-cent spread costs 1 bp on QQQ; crossing a
-  wide, illiquid spread can cost far more than the trade is worth.
+  the book is thin.** It is stated in ticks, with the bps figure kept as a
+  backstop, and the tighter of the two binds. A bps-only guard is useless on a
+  $600 symbol: 75 bps is $4.50, a spread QQQ will never show, so the check
+  would never fire on the one name it matters most for.
 
 ## 2. The anchor
 
@@ -46,22 +48,43 @@ latest quote. This is the single most important detail in the algorithm.
 
 > If the guard were recomputed from the current quote on each reprice, each
 > chase would re-baseline against the price it just chased to, and "maximum
-> 50 bps of slippage" would become unbounded drift over the life of the
+> 25 ticks of slippage" would become unbounded drift over the life of the
 > order. Anchoring makes the worst case a fixed number decided up front.
 
 ## 3. The limit price
 
+The cushion is measured in **ticks and spreads**, not in basis points of the
+price. This is the difference that makes the algorithm work on both halves of
+the pair. A single bps figure cannot: 10 bps is about three ticks on a $28 ETF
+and about sixty on a $600 one, so the same setting is timid on PSQ and
+reckless on QQQ. Ticks are the unit the book is actually quoted in.
+
 For attempt *n* (0 = the initial submission):
 
 ```
-offset_bps = min(BASE_SLIPPAGE_BPS + n * REPRICE_STEP_BPS, MAX_SLIPPAGE_BPS)
+offset_ticks = OFFSET_TICKS + n * REPRICE_STEP_TICKS
+offset       = max(offset_ticks * TICK_SIZE, SPREAD_MULTIPLE * spread)
+offset       = min(offset, guard_distance)
 
-BUY   raw   = ask * (1 + offset_bps / 10_000)      rounded UP   to TICK_SIZE
-      guard = anchor * (1 + MAX_SLIPPAGE_BPS / 10_000)
+guard_distance = min( MAX_SLIPPAGE_TICKS * TICK_SIZE,
+                      anchor * MAX_SLIPPAGE_BPS / 10_000 )
 
-SELL  raw   = bid * (1 - offset_bps / 10_000)      rounded DOWN to TICK_SIZE
-      guard = anchor * (1 - MAX_SLIPPAGE_BPS / 10_000)
+BUY   raw   = ask + offset                rounded UP   to TICK_SIZE
+      guard = anchor + guard_distance
+
+SELL  raw   = bid - offset                rounded DOWN to TICK_SIZE
+      guard = anchor - guard_distance
 ```
+
+Two units for one boundary is deliberate. Ticks are what mean something on a
+given book; the bps figure is a price-proportional backstop, so a fat-fingered
+tick count on any symbol at any price still cannot authorise an unbounded
+chase. **Whichever is tighter wins.**
+
+The spread term is what makes a single setting serve a penny-wide QQQ book and
+a nickel-wide one at the open: on the former the tick floor binds and the order
+crosses by exactly one tick; on the latter the spread term binds and the order
+gets proportionally more room.
 
 Then:
 
@@ -81,18 +104,28 @@ a resting order.
 
 ### Worked example
 
-QQQ bid 500.00 / ask 500.04, `BUY_SLIPPAGE_BPS=10`, `MAX_SLIPPAGE_BPS=50`,
-`REPRICE_STEP_BPS=5`.
+QQQ bid 500.03 / ask 500.04 (the normal penny-wide book), `BUY_OFFSET_TICKS=1`,
+`REPRICE_STEP_TICKS=1`, `SPREAD_MULTIPLE=1.0`, `MAX_SLIPPAGE_TICKS_QQQ=25`.
 
 | Attempt | Offset | Limit | Guard (anchor 500.04) |
 |---|---|---|---|
-| 0 | 10 bps | 500.55 | 502.54 |
-| 1 | 15 bps | ask × 1.0015, ≤ 502.54 | 502.54 |
-| 2 | 20 bps | ask × 1.0020, ≤ 502.54 | 502.54 |
-| … | … | … | 502.54 |
+| 0 | 1 tick | 500.05 | 500.29 |
+| 1 | 2 ticks | 500.06 | 500.29 |
+| 2 | 3 ticks | 500.07 | 500.29 |
+| … | … | ≤ 500.29 | 500.29 |
 
-The limit gets more aggressive each time, but 502.54 is the worst price
+The limit gets more aggressive each time, but 500.29 is the worst price
 possible for this leg no matter how long it runs or how many reprices occur.
+Under the old bps settings that boundary was 502.54 — a $2.50 chase on a
+symbol whose spread is a penny.
+
+A marketable limit fills against the resting offers, not at its own limit, so
+crossing by a tick normally still pays 500.04. The offset buys tolerance for
+the 100-200 ms between the quote and the order's arrival; the guard is what
+decides how far the market may run before the leg gives up.
+
+The same settings on PSQ at 32.11 / 32.12 produce a limit of 32.13 — one tick,
+identically — which is the entire reason for pricing this way.
 
 ## 4. Monitoring, repricing, and partial fills
 
@@ -127,8 +160,15 @@ exceed the budget. When that happens the system does **not** submit the order
 and hope:
 
 ```
-affordable = (budget - already_spent) // new_limit_price
+affordable = lot_floor((budget - already_spent) // new_limit_price)
 ```
+
+The `lot_floor` is not incidental. A reprice that shrinks an order is deciding
+a size, exactly as the original sizing did, so it goes through the same
+`SHARE_LOT_SIZE` rule — otherwise a 20-share order would quietly come back as
+19. The floor is applied to what the budget affords and only *then* compared
+with what is left outstanding, so a partially-filled leg can still finish its
+ragged tail; it is our replacements that stay whole, not the broker's fills.
 
 - `affordable >= remaining` → plain cancel/replace at the new price.
 - `0 < affordable < remaining` → cancel, confirm, and resubmit the *smaller*
@@ -140,11 +180,59 @@ affordable = (budget - already_spent) // new_limit_price
 
 | Situation | Change |
 |---|---|
-| Fills are slow | raise `BUY_SLIPPAGE_BPS` / `SELL_SLIPPAGE_BPS` to 15–25 |
-| Fills are worse than expected | lower `MAX_SLIPPAGE_BPS` to 20–30 |
-| Aborts near the open/close | raise `MAX_SPREAD_BPS`, or avoid the first/last minutes |
+| Fills are slow | raise `BUY_OFFSET_TICKS` / `SELL_OFFSET_TICKS` to 2–3 |
+| Legs abort mid-move on QQQ | raise `MAX_SLIPPAGE_TICKS_QQQ` (25 = $0.25) |
+| Fills are worse than expected | lower `MAX_SLIPPAGE_TICKS_<SYM>` |
+| Aborts near the open/close | raise `MAX_SPREAD_TICKS_<SYM>`, or avoid the first/last minutes |
+| `StaleQuoteError` in normal conditions | raise `MAX_QUOTE_AGE_SECONDS`; the broker's quote timestamps lag |
 | Too many cancel/replaces | raise `REPRICE_INTERVAL_SECONDS` or lower `MAX_REPRICE_ATTEMPTS` |
-| Illiquid symbol swapped in | lower `MAX_SPREAD_BPS`, raise `ORDER_FILL_TIMEOUT_SECONDS` |
+| Illiquid symbol swapped in | lower `MAX_SPREAD_TICKS`, raise `ORDER_FILL_TIMEOUT_SECONDS` |
 
-For QQQ and PSQ during regular hours the defaults (10 bps working, 50 bps hard
-guard) cross a typical 1–2 cent spread with room to spare.
+For QQQ and PSQ during regular hours the defaults cross the touch by exactly
+one tick and abort rather than chase past $0.25 (QQQ) or $0.10 (PSQ).
+
+`MAX_SLIPPAGE_TICKS_QQQ` is the dial worth thinking about hardest. Too tight
+and a leg aborts during an ordinary fast move, leaving the position half
+switched; too loose and it is not a guard. $0.25 is roughly four basis points
+on QQQ, against the $3.00 the bps-only defaults used to allow.
+
+---
+
+## 6. How many shares
+
+Sizing lives in `src/trading/sizing.py`. Two rules shape every buy:
+
+- **`SHARE_LOT_SIZE`** (default 10) — the order quantity is always a whole
+  multiple. Every path that decides a size honours it: the initial sizing, a
+  ladder rung, and a reprice that has to shrink.
+- **`TARGET_CASH_MIN_PCT` / `TARGET_CASH_MAX_PCT`** (default 95 / 98) — the
+  band of available cash a buy aims to deploy. The max is a hard ceiling. The
+  min is a *reporting* threshold, not a floor.
+
+The min is only a reporting threshold because the two rules genuinely conflict
+on a high-priced symbol. A buy can land inside the band only when one lot is
+worth no more than the band is wide:
+
+```
+lot_size * price  <=  (MAX_PCT - MIN_PCT)% * cash
+```
+
+At 10 shares and a 3-point band that is roughly **$200,000 of cash for QQQ**
+(one lot ≈ $6,000) and **$10,000 for PSQ** (one lot ≈ $320). Below that
+threshold the largest whole lot at or under the ceiling is taken and
+`caps_applied` records `below TARGET_CASH_MIN_PCT` with the arithmetic. The lot
+rule wins the conflict, because a ragged share count is the thing the band
+exists to avoid.
+
+The sharpest edge of this: with a 10-share lot, an account holding less than
+about **$5,200** cannot place a QQQ order at all — nine shares is not a lot.
+The resulting error names `SHARE_LOT_SIZE` so it is not mistaken for a genuine
+funding problem. Set `SHARE_LOT_SIZE=1` to size at the share level instead.
+
+| Cash | QQQ @ ~$500 | Deployed |
+|---|---|---|
+| $5,000 | 0 shares — order refused | — |
+| $10,000 | 10 | 50% |
+| $50,000 | 90 | 90% |
+| $250,000 | 480 | 96% ✅ in band |
+| $1,000,000 | 1,950 | 97.5% ✅ in band |

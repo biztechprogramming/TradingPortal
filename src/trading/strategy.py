@@ -290,11 +290,15 @@ class Strategy:
             return
 
         if sizing.quantity < self.settings.min_order_shares:
+            # The caps explain *why* it came to zero, which for a lot-sized
+            # account is usually "9 shares is not a whole lot of 10" rather
+            # than genuine insufficient funds.
+            why = f" [{'; '.join(sizing.caps_applied)}]" if sizing.caps_applied else ""
             result.errors.append(
                 f"insufficient funds: ${balances.cash_available:,.2f} available, "
                 f"${self.settings.cash_buffer_dollars:,.2f} buffer, "
                 f"{target} limit ${decision.limit_price:,.2f} -> "
-                f"{sizing.quantity} shares"
+                f"{sizing.quantity} shares{why}"
             )
             return
 

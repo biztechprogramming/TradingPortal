@@ -28,8 +28,8 @@ def test_flat_to_long(settings, tmp_path):
     assert result.ok, result.errors
     assert result.exposure_before is Exposure.FLAT
     assert result.exposure_after is Exposure.LONG
-    # (10000 - 25 buffer) / 500.55 limit = 19 shares
-    assert broker.get_position("QQQ").quantity == 19
+    # 98% of 10000 / 500.08 limit = 19 shares, rounded down to one lot of 10.
+    assert broker.get_position("QQQ").quantity == 10
     assert broker.get_position("PSQ") is None
     assert result.entry_fill.side is Side.BUY
     assert result.cash_after < result.cash_before
@@ -41,7 +41,9 @@ def test_flat_to_short(settings, tmp_path):
 
     assert result.ok, result.errors
     assert result.exposure_after is Exposure.SHORT
-    assert broker.get_position("PSQ").quantity == 310  # (10000-25)/32.15
+    # 98% of 10000 / 32.14 = 304 shares -> 300, which lands inside the
+    # 95-98% band because a PSQ lot is small relative to the account.
+    assert broker.get_position("PSQ").quantity == 300
     assert broker.get_position("QQQ") is None
 
 
@@ -152,11 +154,11 @@ def test_already_short_does_not_sell_and_rebuy(settings, tmp_path):
 
 def test_already_long_tops_up_with_idle_cash(settings, tmp_path):
     """Spare cash is deployed, but the existing shares are left alone."""
-    broker = make_broker(settings, cash=2_000, positions={"QQQ": 20})
+    broker = make_broker(settings, cash=8_000, positions={"QQQ": 20})
     result = run(settings, tmp_path, broker, Command.GO_LONG)
 
     assert result.ok, result.errors
-    assert broker.get_position("QQQ").quantity == 23   # 20 + 3 more
+    assert broker.get_position("QQQ").quantity == 30   # 20 + one more lot
     assert not any(o.side is Side.SELL for o in broker.submitted_orders)
 
 

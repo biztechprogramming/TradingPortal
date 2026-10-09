@@ -178,7 +178,10 @@ documented inline there. The ones most worth a deliberate decision:
 | `CASH_BUFFER_DOLLARS` | 25 | Larger if you want more headroom against fees |
 | `MAX_ORDER_NOTIONAL_DOLLARS` | 0 (no cap) | **Set this small for your first live trade** |
 | `MAX_SHARES_PER_ORDER` | 0 (no cap) | Same — start at 1 |
-| `MAX_SLIPPAGE_BPS` | 50 | The hard abort guard |
+| `SHARE_LOT_SIZE` | 10 | Set to 1 to size at the share level |
+| `TARGET_CASH_MAX_PCT` | 98 | Ceiling on how much cash a buy deploys |
+| `MAX_SLIPPAGE_TICKS_<SYM>` | QQQ 25, PSQ 10 | The hard abort guard, in ticks |
+| `BUY_OFFSET_TICKS` | 1 | Raise to 2–3 if fills are slow |
 | `MARKET_HOURS_GUARD` | true | Leave on |
 
 ---

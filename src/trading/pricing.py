@@ -76,11 +76,15 @@ def validate_quote(quote: Quote, settings: Settings, now: float | None = None) -
             "check system clock or broker time field"
         )
 
-    if quote.spread_bps > settings.max_spread_bps:
+    max_spread = settings.max_spread_dollars_for(quote.symbol, quote.mid)
+    if quote.spread > max_spread + 1e-9:
+        ticks = quote.spread / settings.tick_size
         raise WideSpreadError(
-            f"{quote.symbol} spread is {quote.spread_bps:.1f} bps "
-            f"(bid {quote.bid} / ask {quote.ask}), limit is "
-            f"{settings.max_spread_bps:.1f} bps"
+            f"{quote.symbol} spread is {quote.spread:.4f} ({ticks:.0f} ticks, "
+            f"{quote.spread_bps:.1f} bps; bid {quote.bid} / ask {quote.ask}), "
+            f"limit is {max_spread:.4f} "
+            f"({settings.max_spread_ticks_for(quote.symbol):g} ticks / "
+            f"{settings.max_spread_bps:.1f} bps, whichever is tighter)"
         )
 
 
@@ -91,11 +95,15 @@ class PriceDecision:
     limit_price: float
     reference_price: float     # the ask (buy) or bid (sell) we priced off
     anchor_price: float        # reference at the *start* of this leg
-    slippage_bps: float        # offset actually applied this attempt
+    slippage_bps: float        # offset actually applied this attempt, in bps
     guard_price: float         # the hard boundary we will never cross
     attempt: int
     spread_bps: float
     capped: bool               # True when the guard clamped the limit
+    offset_ticks: float = 0.0     # cushion requested this attempt, in ticks
+    offset_dollars: float = 0.0   # cushion actually applied, in dollars
+    guard_ticks: float = 0.0      # guard distance from the anchor, in ticks
+    spread_ticks: float = 0.0
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -114,23 +122,42 @@ def compute_limit_price(
 ) -> PriceDecision:
     """Compute a marketable limit price.
 
+    The cushion beyond the touch is measured in **ticks and spreads**, not in
+    basis points of the price. A single bps figure cannot serve a pair like
+    QQQ and PSQ: 10 bps is three ticks on a $28 ETF and sixty ticks on a $600
+    one, so the same setting is timid on one and reckless on the other. Ticks
+    are the unit the book is actually quoted in, and the spread term supplies
+    the extra room a thin book needs without loosening a normal one::
+
+        offset = max(offset_ticks * tick, spread_multiple * spread)
+
     ``anchor_price`` is the reference price captured when the leg began. All
-    guard arithmetic is relative to the anchor, not to the latest quote —
+    guard arithmetic is relative to the anchor, not to the latest quote --
     otherwise each reprice would re-baseline against the price it just
     chased, and the "maximum slippage" would be unbounded over time.
 
-    ``attempt`` escalates the offset by ``reprice_step_bps`` per reprice, so
+    ``attempt`` escalates the offset by ``reprice_step_ticks`` per reprice, so
     the first try is cheap and later tries get progressively more aggressive
     up to the hard guard.
     """
+    tick = settings.tick_size
     reference = quote.ask if side is Side.BUY else quote.bid
     anchor = anchor_price if anchor_price is not None else reference
 
-    offset_bps = settings.slippage_bps(side.value) + attempt * settings.reprice_step_bps
-    offset_bps = min(offset_bps, settings.max_slippage_bps)
+    offset_ticks = (
+        settings.offset_ticks_for(quote.symbol, side.value)
+        + attempt * settings.reprice_step_ticks
+    )
+    offset = max(offset_ticks * tick, settings.spread_multiple * quote.spread)
+
+    guard_distance = settings.guard_distance_for(quote.symbol, anchor)
+    # The working cushion can never exceed the boundary it is bounded by;
+    # clamping here keeps the reported offset honest rather than letting the
+    # guard silently undo it below.
+    offset = min(offset, guard_distance)
 
     if side is Side.BUY:
-        guard = anchor * (1.0 + settings.max_slippage_bps / 10_000.0)
+        guard = anchor + guard_distance
         # If the market itself has run past the guard, chasing is pointless
         # and unsafe: we would be buying above the worst price we declared
         # acceptable before the leg started.
@@ -138,51 +165,56 @@ def compute_limit_price(
             raise MaxSlippageExceeded(
                 f"{quote.symbol} ask {reference:.4f} exceeds the maximum "
                 f"slippage guard {guard:.4f} (anchor {anchor:.4f}, "
-                f"{settings.max_slippage_bps:.0f} bps). Aborting instead of "
+                f"{guard_distance / tick:.0f} ticks). Aborting instead of "
                 "chasing the price."
             )
-        raw = reference * (1.0 + offset_bps / 10_000.0)
-        limit = round_to_tick(raw, settings.tick_size, "up")
+        raw = reference + offset
+        limit = round_to_tick(raw, tick, "up")
         capped = limit > guard
         if capped:
-            limit = round_to_tick(guard, settings.tick_size, "down")
+            limit = round_to_tick(guard, tick, "down")
         # Rounding down to the guard must never fall below the touch, or the
         # order is no longer marketable and will simply rest.
         if limit < reference:
-            limit = round_to_tick(reference, settings.tick_size, "up")
+            limit = round_to_tick(reference, tick, "up")
     else:
-        guard = anchor * (1.0 - settings.max_slippage_bps / 10_000.0)
+        guard = anchor - guard_distance
         if reference < guard:
             raise MaxSlippageExceeded(
                 f"{quote.symbol} bid {reference:.4f} is below the maximum "
                 f"slippage guard {guard:.4f} (anchor {anchor:.4f}, "
-                f"{settings.max_slippage_bps:.0f} bps). Aborting instead of "
+                f"{guard_distance / tick:.0f} ticks). Aborting instead of "
                 "chasing the price down."
             )
-        raw = reference * (1.0 - offset_bps / 10_000.0)
-        limit = round_to_tick(raw, settings.tick_size, "down")
+        raw = reference - offset
+        limit = round_to_tick(raw, tick, "down")
         capped = limit < guard
         if capped:
-            limit = round_to_tick(guard, settings.tick_size, "up")
+            limit = round_to_tick(guard, tick, "up")
         if limit > reference:
-            limit = round_to_tick(reference, settings.tick_size, "down")
+            limit = round_to_tick(reference, tick, "down")
 
     if limit <= 0:
         raise InvalidQuoteError(
             f"computed a non-positive limit price for {quote.symbol}"
         )
 
+    applied = abs(limit - reference)
     return PriceDecision(
         symbol=quote.symbol,
         side=side,
         limit_price=limit,
         reference_price=reference,
         anchor_price=anchor,
-        slippage_bps=offset_bps,
+        slippage_bps=round(applied / reference * 10_000.0, 3) if reference else 0.0,
         guard_price=round(guard, 4),
         attempt=attempt,
         spread_bps=round(quote.spread_bps, 2),
         capped=capped,
+        offset_ticks=round(offset_ticks, 3),
+        offset_dollars=round(applied, 4),
+        guard_ticks=round(guard_distance / tick, 2),
+        spread_ticks=round(quote.spread / tick, 2),
         reason=(
             "clamped to hard slippage guard" if capped else "marketable limit"
         ),

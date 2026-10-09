@@ -390,18 +390,31 @@ one. The ones that matter most:
 | `REQUIRE_CONFIRMATION` | `true` | Confirm live LONG/SHORT |
 | `CASH_BUFFER_DOLLARS` | `25` | Held back from every buy |
 | `ALLOW_MARGIN` | `false` | Ignore margin buying power |
-| `BUY_SLIPPAGE_BPS` / `SELL_SLIPPAGE_BPS` | `10` | Working offset through the touch |
-| `MAX_SLIPPAGE_BPS` | `50` | **Hard guard** — abort rather than chase |
-| `MAX_SPREAD_BPS` | `75` | Refuse to trade a wide book |
-| `MAX_QUOTE_AGE_SECONDS` | `10` | Refuse stale quotes |
+| `SHARE_LOT_SIZE` | `10` | Order quantities are whole lots of this many shares |
+| `TARGET_CASH_MIN_PCT` / `TARGET_CASH_MAX_PCT` | `95` / `98` | Share of available cash a buy deploys |
+| `BUY_OFFSET_TICKS` / `SELL_OFFSET_TICKS` | `1` | Working offset through the touch, in ticks |
+| `SPREAD_MULTIPLE` | `1.0` | Widen the offset with the spread on a thin book |
+| `MAX_SLIPPAGE_TICKS_<SYM>` | QQQ `25`, PSQ `10` | **Hard guard** — abort rather than chase |
+| `MAX_SPREAD_TICKS_<SYM>` | QQQ `5`, PSQ `10` | Refuse to trade a wide book |
+| `MAX_QUOTE_AGE_SECONDS` | `2` | Refuse stale quotes |
 | `ORDER_FILL_TIMEOUT_SECONDS` | `90` | Cancel and report after this |
 | `MAX_REPRICE_ATTEMPTS` | `5` | Cap on cancel/replace cycles |
 | `DUPLICATE_COMMAND_WINDOW_SECONDS` | `30` | Double-tap guard |
 | `MAX_DAILY_COMMANDS` | `50` | Runaway-automation guard |
 | `MARKET_HOURS_GUARD` | `true` | Regular session only |
 
-Slippage accepts either basis points or percent (`BUY_SLIPPAGE_PCT=0.10`
-≡ `BUY_SLIPPAGE_BPS=10`).
+Limit prices are measured in **ticks**, not basis points — 10 bps is 3 ticks on
+PSQ and 60 on QQQ, so one bps setting cannot serve both. The bps variables
+(`MAX_SLIPPAGE_BPS`, `MAX_SPREAD_BPS`) still exist as price-proportional
+backstops, and whichever limit is tighter binds. See
+[docs/LIMIT_ALGORITHM.md](docs/LIMIT_ALGORITHM.md).
+
+Buys are sized in whole lots of `SHARE_LOT_SIZE` shares targeting 95–98% of
+available cash. On a high-priced symbol those two rules conflict below a
+certain account size — a 10-share QQQ lot is ~$6,000, so the band is only
+reachable above roughly $200k, and under ~$5,200 no QQQ order can be placed at
+all. Sizing takes the largest whole lot under the ceiling and records the
+shortfall; set `SHARE_LOT_SIZE=1` to size at the share level.
 
 ---
 

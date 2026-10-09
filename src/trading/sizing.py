@@ -1,7 +1,17 @@
 """Position sizing.
 
-Goal: deploy essentially all available cash. Hard rule: the *estimated worst
-case cost* of an order must never exceed the funds we are allowed to spend.
+Goal: deploy a deliberate slice of available cash -- ``TARGET_CASH_MAX_PCT``
+of it, in whole lots of ``SHARE_LOT_SIZE`` shares. Hard rule: the *estimated
+worst case cost* of an order must never exceed the funds we are allowed to
+spend.
+
+The two knobs pull against each other on a high-priced symbol. One lot of 10
+QQQ is ~$6,000, so lot rounding can only land inside a 95-98% band when the
+account holds enough cash that a lot is smaller than the band is wide (roughly
+$200k for QQQ, $10k for PSQ). Below that the largest lot at or under the
+ceiling is taken and ``caps_applied`` records that the band was unreachable --
+the lot rule wins, because a ragged share count is the thing the band exists
+to avoid.
 
 Because we always send limit orders, the worst-case cost of a buy is exactly
 ``quantity * limit_price`` plus estimated fees — never the ask, never the
@@ -33,9 +43,24 @@ class SizingDecision:
     buffer_applied: float
     margin_allowed: bool
     caps_applied: list[str]
+    lot_size: int = 1
+    #: Estimated cost as a percentage of spendable cash, for the audit log.
+    deployed_pct: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def lot_floor(quantity: float, settings: Settings) -> int:
+    """Round a share count down to a whole lot.
+
+    Every path that decides an order size has to go through this, not just
+    :func:`calculate_quantity`: a reprice that shrinks an order to fit a
+    higher limit is deciding a size too, and a 19-share replacement would
+    quietly break the divisibility the account is supposed to keep.
+    """
+    lot = max(1, settings.share_lot_size)
+    return max(0, int(quantity) // lot * lot)
 
 
 def spendable_cash(balances: Balances, settings: Settings) -> float:
@@ -66,8 +91,18 @@ def calculate_quantity(
         raise InsufficientFunds("cannot size an order against a non-positive price")
 
     caps: list[str] = []
+    lot = max(1, settings.share_lot_size)
     available = spendable_cash(balances, settings)
-    usable = available - settings.cash_buffer_dollars - settings.estimated_fee_fixed
+
+    # Two ceilings: the hard one that keeps the buffer intact, and the target
+    # one that deliberately leaves headroom. The tighter binds.
+    hard_ceiling = available - settings.cash_buffer_dollars - settings.estimated_fee_fixed
+    target_ceiling = (
+        available * settings.target_cash_max_pct / 100.0 - settings.estimated_fee_fixed
+    )
+    usable = min(hard_ceiling, target_ceiling)
+    if target_ceiling < hard_ceiling:
+        caps.append(f"TARGET_CASH_MAX_PCT={settings.target_cash_max_pct:g}")
 
     if settings.max_order_notional_dollars > 0 and usable > settings.max_order_notional_dollars:
         usable = settings.max_order_notional_dollars
@@ -87,26 +122,42 @@ def calculate_quantity(
             buffer_applied=settings.cash_buffer_dollars,
             margin_allowed=settings.allow_margin,
             caps_applied=caps + ["no usable cash after buffer"],
+            lot_size=lot,
         )
 
     per_share_cost = limit_price + settings.estimated_fee_per_share
-    quantity = int(math.floor(usable / per_share_cost))
+    raw_quantity = int(math.floor(usable / per_share_cost))
 
-    if settings.max_shares_per_order > 0 and quantity > settings.max_shares_per_order:
-        quantity = settings.max_shares_per_order
+    if settings.max_shares_per_order > 0 and raw_quantity > settings.max_shares_per_order:
+        raw_quantity = settings.max_shares_per_order
         caps.append(f"MAX_SHARES_PER_ORDER={settings.max_shares_per_order}")
 
-    quantity = max(0, quantity)
+    quantity = max(0, (max(0, raw_quantity) // lot) * lot)
+    if lot > 1 and quantity != raw_quantity:
+        caps.append(f"SHARE_LOT_SIZE={lot} (from {raw_quantity} shares)")
+
     fees = settings.estimated_fee_fixed + quantity * settings.estimated_fee_per_share
     estimated_cost = quantity * limit_price + fees
 
-    # Defensive: floating-point division can round the last share up.
+    # Defensive: floating-point division can round the last share up. Step by a
+    # whole lot so the divisibility guarantee survives the correction.
     while quantity > 0 and estimated_cost > available - settings.cash_buffer_dollars:
-        quantity -= 1
+        quantity -= lot
+        quantity = max(0, quantity)
         fees = settings.estimated_fee_fixed + quantity * settings.estimated_fee_per_share
         estimated_cost = quantity * limit_price + fees
         if "float-safety decrement" not in caps:
             caps.append("float-safety decrement")
+
+    deployed_pct = (estimated_cost / available * 100.0) if available > 0 else 0.0
+    if quantity > 0 and deployed_pct < settings.target_cash_min_pct:
+        # Not an error: on a high-priced symbol one lot can be worth more than
+        # the whole 95-98% band is wide, so this is the closest reachable size.
+        caps.append(
+            f"below TARGET_CASH_MIN_PCT={settings.target_cash_min_pct:g} "
+            f"({deployed_pct:.1f}% deployed); one lot of {lot} is "
+            f"${lot * limit_price:,.2f} against ${available:,.2f} available"
+        )
 
     return SizingDecision(
         quantity=quantity,
@@ -119,4 +170,6 @@ def calculate_quantity(
         buffer_applied=settings.cash_buffer_dollars,
         margin_allowed=settings.allow_margin,
         caps_applied=caps,
+        lot_size=lot,
+        deployed_pct=round(deployed_pct, 2),
     )

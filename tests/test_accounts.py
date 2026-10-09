@@ -211,7 +211,9 @@ def _service(tmp_path, **overrides) -> TradingService:
         make_broker(s, "schwab:1111", cash=10_000),
         make_broker(s, "schwab:2222", cash=20_000),
         make_broker(s, "schwab:3333", cash=30_000),
-        make_broker(s, "ibkr:DU1", cash=5_000),
+        # Enough cash for at least one 10-share QQQ lot; below ~$5.2k the
+        # account cannot place a lot-sized order at all.
+        make_broker(s, "ibkr:DU1", cash=15_000),
     ]
     for broker in inner:
         broker.broker_type = "ibkr" if "ibkr" in broker.name else "schwab"
@@ -250,7 +252,7 @@ def test_readonly_cash_counts_toward_the_combined_view(tmp_path):
     """You are shown the whole picture even where you cannot trade."""
     svc = _service(tmp_path)
     combined = svc.status()["combined"]
-    assert combined["cash_available"] == 65_000.0   # includes the locked 30k
+    assert combined["cash_available"] == 75_000.0   # includes the locked 30k
 
 
 def test_each_account_is_sized_from_its_own_cash(tmp_path):
@@ -259,8 +261,8 @@ def test_each_account_is_sized_from_its_own_cash(tmp_path):
 
     small = svc.brokers["schwab:1111"].get_position("QQQ").quantity
     large = svc.brokers["schwab:2222"].get_position("QQQ").quantity
-    assert small == 19        # (10000 - 25) / 500.55
-    assert large == 39        # (20000 - 25) / 500.55
+    assert small == 10        # 98% of 10000 / 500.08 -> 19 -> one lot
+    assert large == 30        # 98% of 20000 / 500.08 -> 39 -> three lots
     assert large > small
 
 

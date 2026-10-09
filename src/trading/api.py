@@ -31,6 +31,7 @@ from .errors import (
     TradingError,
     UnreconciledState,
 )
+from .logins import IbkrGatewayRestart, LoginError, SchwabLoginFlow, ibeam_running, schwab_token_status
 from .models import Command
 from .orchestrator import TradingService
 
@@ -62,6 +63,14 @@ class CommandRequest(BaseModel):
 
 class AcknowledgeRequest(BaseModel):
     note: str = ""
+
+
+class SchwabLoginRequest(BaseModel):
+    login: str = Field(..., description="A label from SCHWAB_LOGINS")
+
+
+class SchwabPasteRequest(BaseModel):
+    url: str = Field(..., description="The full URL Schwab redirected to")
 
 
 class LadderOrderRequest(BaseModel):
@@ -418,6 +427,84 @@ def create_app(
     @app.post("/api/reconnect", dependencies=[Auth])
     def reconnect() -> dict[str, Any]:
         return {"errors": service.connect_all()}
+
+    # --- logins -----------------------------------------------------------
+
+    def _reconnect_after_login(broker_type: str, done: str) -> str:
+        try:
+            errors = service.rebuild_brokers()
+        except ExecutionLocked:
+            return f"{done} A command is running; press Refresh once it finishes."
+        failed = [
+            f"{name}: {err}" for name, err in errors.items()
+            if err and service.brokers[name].broker_type == broker_type
+        ]
+        if failed:
+            return f"{done} But reconnecting failed — " + "; ".join(failed)
+        return f"{done} Connected."
+
+    schwab_login = SchwabLoginFlow(
+        settings,
+        on_success=lambda login: _reconnect_after_login(
+            "schwab", f"Schwab login {login!r} authorised."),
+    )
+    ibkr_restart = IbkrGatewayRestart(
+        settings,
+        on_authenticated=lambda: _reconnect_after_login(
+            "ibkr", "IBKR gateway logged in."),
+    )
+
+    @app.get("/api/logins", dependencies=[Auth])
+    def get_logins() -> dict[str, Any]:
+        """Login state for each broker, for the dashboard's Logins panel."""
+        ibkr_brokers = [
+            b for b in service.brokers.values() if b.broker_type == "ibkr"
+        ]
+        ibkr_enabled = "ibkr" in settings.brokers_enabled
+        ibkr_connected = any(b.connected for b in ibkr_brokers)
+        if ibkr_enabled and not ibkr_connected:
+            ibkr_restart.reconnect_if_ready()
+        return {
+            "schwab": {
+                "enabled": "schwab" in settings.brokers_enabled,
+                "configured": bool(
+                    settings.schwab_app_key and settings.schwab_app_secret
+                ),
+                "callback_url": settings.schwab_callback_url,
+                "logins": [
+                    schwab_token_status(settings, login)
+                    for login in settings.schwab_logins
+                ],
+                "flow": schwab_login.status(),
+            },
+            "ibkr": {
+                "enabled": ibkr_enabled,
+                "connected": ibkr_connected,
+                "error": next(
+                    (b.last_error for b in ibkr_brokers if b.last_error), None
+                ),
+                "gateway_running": ibeam_running() if ibkr_enabled else None,
+                "restart": ibkr_restart.status(),
+            },
+        }
+
+    @app.post("/api/logins/schwab/start", dependencies=[Auth])
+    def start_schwab_login(payload: SchwabLoginRequest) -> dict[str, Any]:
+        try:
+            return schwab_login.start(payload.login)
+        except LoginError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/logins/schwab/paste", dependencies=[Auth])
+    def paste_schwab_redirect(payload: SchwabPasteRequest) -> dict[str, Any]:
+        try:
+            return schwab_login.paste(payload.url)
+        except LoginError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/logins/ibkr/restart", dependencies=[Auth])
+    def restart_ibkr_gateway() -> dict[str, Any]:
+        return ibkr_restart.restart()
 
     return app
 

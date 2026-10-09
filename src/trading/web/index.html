@@ -33,6 +33,23 @@
   <section id="alerts"></section>
 
   <section class="panel">
+    <h2>Logins</h2>
+    <div id="logins" class="logins"><div class="muted">loading…</div></div>
+    <div id="login-flow" class="login-flow hidden">
+      <div id="login-flow-msg"></div>
+      <div id="login-paste" class="login-paste hidden">
+        <p class="muted">
+          If the Schwab tab ends on an error page instead of “Authorised”, copy
+          its full address and paste it here within 30 seconds.
+        </p>
+        <input id="login-paste-input" type="text" autocomplete="off"
+               placeholder="https://127.0.0.1:8182/?code=…">
+        <button id="login-paste-btn" class="small">Submit</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
     <div class="panel-head">
       <h2>Price ladder</h2>
       <span class="muted" id="ladder-note"></span>

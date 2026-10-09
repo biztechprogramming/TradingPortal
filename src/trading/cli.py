@@ -16,7 +16,6 @@ import os
 import sys
 import threading
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -576,13 +575,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _code_from_url(url: str) -> str:
-    """Pull ``?code=`` out of a redirected URL.
+    from .logins import code_from_url
 
-    ``parse_qs`` percent-decodes, which matters: Schwab codes end in ``@``,
-    shown as ``%40`` in the address bar. Sending the encoded form is rejected.
-    """
-    parsed = urllib.parse.urlparse(url.strip())
-    return (urllib.parse.parse_qs(parsed.query).get("code") or [""])[0]
+    return code_from_url(url)
 
 
 def _open_browser(url: str) -> None:
@@ -648,10 +643,7 @@ def _await_redirect(
 
 def cmd_schwab_login(args: argparse.Namespace) -> int:
     """Interactive OAuth authorisation-code flow for the Schwab Trader API."""
-    import base64
-
-    import httpx
-
+    from .logins import LoginError, exchange_schwab_code, schwab_auth_url
     from .oauth_listener import start_catcher
 
     settings = load_settings(args.env_file)
@@ -674,12 +666,7 @@ def cmd_schwab_login(args: argparse.Namespace) -> int:
               f"and its own token file. Sharing one file between logins makes "
               f"each refresh invalidate the other.{RESET}")
 
-    params = urllib.parse.urlencode({
-        "client_id": settings.schwab_app_key,
-        "redirect_uri": settings.schwab_callback_url,
-        "response_type": "code",
-    })
-    auth_url = f"{settings.schwab_base_url}/v1/oauth/authorize?{params}"
+    auth_url = schwab_auth_url(settings)
 
     # Schwab's authorisation codes expire about thirty seconds after you
     # approve, so the copy-and-paste is a race the user often loses. Catch the
@@ -731,56 +718,14 @@ def cmd_schwab_login(args: argparse.Namespace) -> int:
         if code is None:
             return 2
 
-    basic = base64.b64encode(
-        f"{settings.schwab_app_key}:{settings.schwab_app_secret}".encode()
-    ).decode()
     try:
-        resp = httpx.post(
-            f"{settings.schwab_base_url}/v1/oauth/token",
-            headers={
-                "Authorization": f"Basic {basic}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": settings.schwab_callback_url,
-            },
-            timeout=30,
-        )
-    except httpx.RequestError as exc:
-        # The code dies in about 30 seconds, so a traceback here would cost
-        # the user the whole round trip while they worked out what it meant.
-        print(_colour(f"\nCould not reach Schwab: {exc}", RED))
-        print(f"{DIM}Check the network and SCHWAB_BASE_URL, then re-run — "
-              f"the code is\nalready spent, so this needs a fresh "
-              f"authorisation.{RESET}")
-        return 2
-    if resp.status_code != 200:
-        print(_colour(f"Token exchange failed: HTTP {resp.status_code}", RED))
-        print(resp.text[:500])
-        if "invalid_grant" in resp.text:
-            print(f"\n{DIM}That code was expired or already used. Codes live "
-                  f"about 30 seconds\nand work exactly once — each attempt "
-                  f"needs a fresh trip through the\nauthorise URL this "
-                  f"command prints.{RESET}")
-        elif "invalid_client" in resp.text:
-            print(f"\n{DIM}Schwab rejected the app credentials. Check "
-                  f"SCHWAB_APP_KEY and\nSCHWAB_APP_SECRET, and that the app "
-                  f"shows Ready For Use in the portal.{RESET}")
+        exchange_schwab_code(settings, login, code)
+    except LoginError as exc:
+        print(_colour(f"\n{exc}", RED))
         return 2
 
-    payload = resp.json()
-    from .brokers.schwab import _TokenStore, discover_schwab_accounts
+    from .brokers.schwab import discover_schwab_accounts
 
-    store = _TokenStore(token_path)
-    store.save({
-        "access_token": payload["access_token"],
-        "refresh_token": payload["refresh_token"],
-        "expires_at": time.time() + float(payload.get("expires_in", 1800)),
-        "obtained_at": time.time(),
-        "login": login,
-    })
     print(_colour(f"\nSaved to {token_path} (mode 0600).", GREEN))
 
     try:

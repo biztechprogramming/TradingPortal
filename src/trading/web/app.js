@@ -68,6 +68,7 @@ $('token-save').addEventListener('click', () => {
   sessionStorage.setItem('api_token', value);
   $('token-prompt').classList.add('hidden');
   refresh();
+  refreshLogins();
 });
 
 // --- live reload ------------------------------------------------------------
@@ -1030,6 +1031,148 @@ function attachCrosshair(host, ctx) {
   });
 }
 
+// --- logins -----------------------------------------------------------------
+// Schwab tokens die every 7 days and the IBKR gateway session can drop, so
+// both logins live here rather than in a terminal. The Schwab consent page
+// opens in its own tab; the server catches the redirect on the callback
+// address and the panel follows along by polling /api/logins.
+
+let loginsBusy = false;   // a login is in flight: poll faster
+
+function loginPill(state) {
+  return {
+    ok: '<span class="pill pill-ok">OK</span>',
+    expiring: '<span class="pill pill-warn">RENEW SOON</span>',
+    expired: '<span class="pill pill-bad">EXPIRED</span>',
+    missing: '<span class="pill pill-bad">NOT LOGGED IN</span>',
+    unreadable: '<span class="pill pill-bad">UNREADABLE</span>',
+    unknown: '<span class="pill pill-warn">AGE UNKNOWN</span>',
+  }[state] || '';
+}
+
+function renderLogins(data) {
+  const rows = [];
+  const schwab = data.schwab || {};
+  const flow = schwab.flow || {};
+  const flowActive = flow.state === 'waiting' || flow.state === 'exchanging';
+
+  if (schwab.enabled && !schwab.configured) {
+    rows.push(`<div class="login-row"><span class="login-name">Schwab</span>
+      <span class="login-detail muted">Set SCHWAB_APP_KEY and SCHWAB_APP_SECRET in .env first.</span></div>`);
+  } else if (schwab.enabled) {
+    for (const l of schwab.logins || []) {
+      const left = l.days_left === null || l.days_left === undefined
+        ? '' : l.days_left > 0 ? `${l.days_left.toFixed(1)} days left` : '';
+      const label = schwab.logins.length > 1 ? `Schwab · ${esc(l.login)}` : 'Schwab';
+      rows.push(`<div class="login-row">
+        <span class="login-name">${label}</span>
+        <span class="login-detail">${loginPill(l.state)} <span class="muted">${left}</span></span>
+        <button class="small" data-schwab-login="${esc(l.login)}" ${flowActive ? 'disabled' : ''}>
+          ${l.state === 'ok' ? 'Log in again' : 'Log in'}</button>
+      </div>`);
+    }
+  }
+
+  const ibkr = data.ibkr || {};
+  const restart = ibkr.restart || {};
+  const restarting = restart.state === 'restarting';
+  if (ibkr.enabled) {
+    const pill = ibkr.connected
+      ? '<span class="pill pill-ok">LOGGED IN</span>'
+      : ibkr.gateway_running === false
+        ? '<span class="pill pill-bad">GATEWAY STOPPED</span>'
+        : '<span class="pill pill-bad">NOT LOGGED IN</span>';
+    const note = restart.state && restart.state !== 'idle'
+      ? `<span class="muted">${esc(restart.message || '')}</span>`
+      : (!ibkr.connected && ibkr.error ? `<span class="muted">${esc(ibkr.error)}</span>` : '');
+    rows.push(`<div class="login-row">
+      <span class="login-name">Interactive Brokers</span>
+      <span class="login-detail">${pill} ${note}</span>
+      ${ibkr.connected && !restarting ? '' : `<button class="small" id="ibkr-restart" ${restarting ? 'disabled' : ''}>
+        ${restarting ? 'Waiting for phone approval…' : 'Log in'}</button>`}
+    </div>`);
+  }
+
+  $('logins').innerHTML = rows.join('') || '<div class="muted">No brokers need a login.</div>';
+
+  for (const btn of document.querySelectorAll('[data-schwab-login]')) {
+    btn.addEventListener('click', (e) => startSchwabLogin(e.currentTarget.dataset.schwabLogin));
+  }
+  const ib = document.getElementById('ibkr-restart');
+  if (ib) ib.addEventListener('click', restartIbkr);
+
+  // The flow box is updated in place, never re-rendered, so a half-pasted
+  // URL survives the poll.
+  const showFlow = flow.state && flow.state !== 'idle';
+  $('login-flow').classList.toggle('hidden', !showFlow);
+  if (showFlow) {
+    const cls = flow.state === 'failed' ? 'alert alert-error'
+      : flow.state === 'done' ? 'alert alert-ok' : 'alert alert-warn';
+    $('login-flow-msg').className = cls;
+    $('login-flow-msg').textContent = flow.message || '';
+  }
+  $('login-paste').classList.toggle('hidden', flow.state !== 'waiting');
+
+  const wasBusy = loginsBusy;
+  loginsBusy = flowActive || restarting;
+  // A login just finished: the broker set may have changed.
+  if (wasBusy && !loginsBusy) refresh();
+}
+
+async function refreshLogins() {
+  if (!TOKEN) return;
+  try {
+    const res = await api('/api/logins');
+    if (res.status === 200) renderLogins(res.body);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function startSchwabLogin(login) {
+  // Opened inside the click so the popup blocker allows it; pointed at
+  // Schwab once the server has its listener up.
+  const tab = window.open('about:blank', '_blank');
+  const res = await api('/api/logins/schwab/start', {
+    method: 'POST',
+    body: JSON.stringify({ login }),
+  });
+  if (res.status !== 200) {
+    if (tab) tab.close();
+    alert(res.body.detail || 'Could not start the Schwab login.');
+    return;
+  }
+  $('login-paste-input').value = '';
+  if (tab) tab.location = res.body.auth_url;
+  else window.open(res.body.auth_url, '_blank');
+  refreshLogins();
+}
+
+async function submitPastedUrl() {
+  const url = $('login-paste-input').value.trim();
+  if (!url) return;
+  $('login-paste-btn').disabled = true;
+  try {
+    const res = await api('/api/logins/schwab/paste', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    });
+    if (res.status !== 200) alert(res.body.detail || 'That URL was not accepted.');
+    else $('login-paste-input').value = '';
+  } finally {
+    $('login-paste-btn').disabled = false;
+    refreshLogins();
+  }
+}
+
+async function restartIbkr() {
+  if (!confirm('Log in to IBKR? An approval will be sent to your phone.')) return;
+  await api('/api/logins/ibkr/restart', { method: 'POST' });
+  refreshLogins();
+}
+
+$('login-paste-btn').addEventListener('click', submitPastedUrl);
+
 // --- refresh ----------------------------------------------------------------
 
 async function refresh() {
@@ -1172,6 +1315,13 @@ $('btn-refresh').addEventListener('click', refresh);
 
 renderRangePicker();
 refresh();
+refreshLogins();
+// Every 2s while a login is in flight, otherwise every 10s.
+let loginTicks = 0;
+setInterval(() => {
+  loginTicks += 1;
+  if (loginsBusy || loginTicks % 5 === 0) refreshLogins();
+}, 2000);
 setInterval(() => { if (!busy) refresh(); }, 10000);
 refreshCandles();
 setInterval(() => { if (!busy) refreshCandles(); }, 60000);

@@ -71,6 +71,9 @@ class TradingService:
         self.audit = AuditLog(settings.log_dir)
         self.state = StateStore(settings.state_dir / "state.json")
         self.lock = ExecutionLock(settings.state_dir / "execution.lock")
+        #: Injected brokers (tests) are kept as given; built ones can be
+        #: rebuilt after a login, when accounts may have appeared.
+        self._rebuildable = brokers is None
         self.brokers: dict[str, Broker] = brokers or build_brokers(settings)
         self.environment_warnings: list[str] = []
         self._connect_lock = threading.Lock()
@@ -110,6 +113,28 @@ class TradingService:
         for warning in self.environment_warnings:
             log.warning("%s", warning)
         return errors
+
+    def rebuild_brokers(self) -> dict[str, str | None]:
+        """Re-discover accounts and reconnect, e.g. after a fresh login.
+
+        A broker that was down at startup is represented by a single fallback
+        instance, and a new Schwab authorisation may cover new accounts, so a
+        reconnect alone is not enough. Held under the execution lock so the
+        set of brokers never changes underneath a running command.
+        """
+        with self.lock.acquire(owner="rebuild_brokers"):
+            if self._rebuildable:
+                fresh = build_brokers(self.settings)
+                with self._connect_lock:
+                    old, self.brokers = self.brokers, fresh
+                for broker in old.values():
+                    try:
+                        broker.close()
+                    except Exception:
+                        pass
+            with self._quote_memo_lock:
+                self._quote_memo.clear()
+            return self.connect_all()
 
     def display_quote(self, broker: Broker, symbol: str) -> tuple[Any, str | None]:
         """A quote for the dashboard, memoised for a few seconds.

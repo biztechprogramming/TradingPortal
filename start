@@ -20,70 +20,20 @@ warn() { printf '%s !  %s%s\n' "$YELLOW" "$1" "$OFF"; }
 fail() { printf '%s XX %s%s\n' "$RED" "$1" "$OFF"; }
 
 # --- 1. IBKR gateway ---------------------------------------------------------
+# Started but not waited on: the gateway logs itself in (approve on your
+# phone), and the dashboard's Logins panel shows when it has.
 step "IBKR gateway (Docker)"
 
 if ! docker info >/dev/null 2>&1; then
     fail "Docker is not available. IBKR will be unreachable; Schwab still works."
+elif [ -n "$(docker ps -q -f name=qqq-ibeam)" ]; then
+    echo "    already running"
 else
-    if [ -n "$(docker ps -q -f name=qqq-ibeam)" ]; then
-        echo "    already running"
-    else
-        docker compose up -d ibeam >/dev/null
-        echo "    started"
-    fi
-
-    printf '    authenticating'
-    authed=""
-    for _ in $(seq 1 60); do
-        if docker logs --tail 40 qqq-ibeam 2>&1 | grep -q "running and authenticated"; then
-            authed=1; break
-        fi
-        printf '.'; sleep 2
-    done
-    printf '\n'
-
-    if [ -n "$authed" ]; then
-        echo "    ${GREEN}authenticated${OFF}"
-    else
-        warn "gateway did not authenticate within 120s."
-        echo "    ${DIM}Check your phone for an IBKR approval prompt, then:"
-        echo "      docker compose logs -f ibeam${OFF}"
-    fi
+    docker compose up -d ibeam >/dev/null
+    echo "    started — approve the IBKR login on your phone"
 fi
 
-# --- 2. Schwab tokens --------------------------------------------------------
-# Schwab refresh tokens die after exactly 7 days. Finding that out at 09:31 on
-# a Monday is avoidable, so it is checked on every startup.
-step "Schwab authorisation"
-PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY="$(command -v python3)"
-"$PY" - "$STATE" <<'PYEOF'
-import json, sys, time
-from pathlib import Path
-
-state = Path(sys.argv[1])
-tokens = sorted(state.glob("schwab_token*.json"))
-if not tokens:
-    print("    \033[33m !  no Schwab tokens — run ./qqq schwab-login\033[0m")
-for path in tokens:
-    label = path.stem.replace("schwab_token_", "").replace("schwab_token", "default")
-    try:
-        obtained = json.loads(path.read_text()).get("obtained_at")
-    except Exception:
-        print(f"    \033[31m XX {label}: token unreadable\033[0m"); continue
-    if not obtained:
-        print(f"    {label}: present (age unknown)"); continue
-    days_left = 7 - (time.time() - float(obtained)) / 86400
-    if days_left <= 0:
-        print(f"    \033[31m XX {label}: EXPIRED — "
-              f"./qqq schwab-login --login {label}\033[0m")
-    elif days_left < 2:
-        print(f"    \033[33m !  {label}: {days_left:.1f} days left — "
-              f"renew soon\033[0m")
-    else:
-        print(f"    \033[32m{label}: {days_left:.1f} days left\033[0m")
-PYEOF
-
-# --- 3. dashboard ------------------------------------------------------------
+# --- 2. dashboard ------------------------------------------------------------
 step "Dashboard"
 
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -108,23 +58,11 @@ PORT="${PORT:-8787}"
 
 cat <<BANNER
 
-${GREEN}Everything is up.${OFF}
+${GREEN}Everything is up.${OFF} Log in to Schwab and IBKR from the dashboard's Logins panel.
 
-  1. In VS Code, open the ${YELLOW}PORTS${OFF} panel (Ctrl-\` then the PORTS tab)
-     and make sure port ${YELLOW}${PORT}${OFF} is forwarded.
+  Open:   ${YELLOW}http://localhost:${PORT}/${OFF}   ${DIM}(forward port ${PORT} in VS Code's PORTS panel)${OFF}
+  Token:  ${YELLOW}${TOKEN}${OFF}
 
-  2. Open:   ${YELLOW}http://localhost:${PORT}/${OFF}
-     ${DIM}(if that hangs, try 127.0.0.1 instead)${OFF}
-
-  3. Paste this token when the page asks:
-
-        ${YELLOW}${TOKEN}${OFF}
-
-     ${DIM}It is kept for that browser tab only, so a new tab asks again.
-     The token is deliberately not in the URL — a URL carrying a
-     credential ends up in browser history.${OFF}
-
-${DIM}  Logs:   tail -f ${LOGFILE}
-  Stop:   ./stop${OFF}
+${DIM}  Schwab login needs port 8182 forwarded too.  Logs: tail -f ${LOGFILE}   Stop: ./stop${OFF}
 
 BANNER

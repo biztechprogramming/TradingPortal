@@ -388,7 +388,36 @@ function renderLadder(ladder) {
          </div>`
       : '';
 
-    const rows = (entry.rungs || []).map((r) => {
+    // Typed-in price: defaults to the bid, survives the 10s redraw.
+    const ask = q.ask || 0;
+    const draft = priceDrafts[sym];
+    const startPrice = draft ?? (q.bid || q.last
+      ? snapToTick(q.bid || q.last, tick).toFixed(priceDecimals(tick)) : '');
+    const entryHtml = `<div class="order-entry">
+        <div class="order-row">
+          <button class="small step-btn" data-symbol="${esc(sym)}" data-dir="-1"
+            title="Down one tick">−</button>
+          <input class="price-input" data-symbol="${esc(sym)}" data-tick="${tick}"
+            inputmode="decimal" autocomplete="off" value="${esc(startPrice)}">
+          <button class="small step-btn" data-symbol="${esc(sym)}" data-dir="1"
+            title="Up one tick">+</button>
+          <button class="small buy-btn" data-symbol="${esc(sym)}">Buy</button>
+          <button class="small reset-btn" data-symbol="${esc(sym)}"
+            title="Reset to the bid">Bid</button>
+        </div>
+        <div class="order-hint" id="hint-${esc(sym)}"></div>
+        <button class="small buy-now-btn" data-symbol="${esc(sym)}"
+          data-price="${ask}" data-tick="${tick}" ${ask ? '' : 'disabled'}>
+          Buy now @ ask ${fmtPrice(ask || null, tick)}</button>
+      </div>`;
+
+    // Only prices that wait are listed; anything at or above the ask is the
+    // same action as "Buy now", so it is not repeated as a rung.
+    const allRungs = entry.rungs || [];
+    const restingRungs = allRungs.filter((r) => !r.marketable);
+    const hiddenCount = allRungs.length - restingRungs.length;
+
+    const rows = restingRungs.map((r) => {
       const isWorking = working.some(
         (w) => Math.abs(w.price - r.price) < (tick || 0.01) / 2);
       const badges = [
@@ -417,21 +446,132 @@ function renderLadder(ladder) {
         <span class="num">${fmtPrice(q.last, tick)}</span></div>
       <div class="kv"><span>Bid / Ask</span>
         <span class="num">${fmtPrice(q.bid, tick)} / ${fmtPrice(q.ask, tick)}</span></div>
+      ${entryHtml}
       ${workingNote}
-      <div class="rungs">${rows || '<div class="muted">no rungs</div>'}</div>
+      <div class="rungs">${rows || '<div class="muted">no resting rungs</div>'}</div>
+      ${hiddenCount ? `<div class="sub-note">${hiddenCount} rung(s) at or above
+        the ask hidden — they would fill now; use Buy now instead.</div>` : ''}
     </div>`;
   }).join('');
+
+  // Redrawing replaces the input; put the cursor back if it was in one.
+  const focused = document.activeElement;
+  const focusSym = focused?.classList?.contains('price-input')
+    ? focused.dataset.symbol : null;
+  const caret = focusSym ? focused.selectionStart : null;
 
   $('ladder').innerHTML = cards || '<div class="muted">no symbols</div>';
   $('ladder-note').textContent = `${ladder.levels} level(s) each side of high and low`;
 
-  for (const btn of document.querySelectorAll('.rung')) {
+  for (const btn of document.querySelectorAll('.rung, .buy-now-btn')) {
     btn.addEventListener('click', (e) => {
       const el = e.currentTarget;
       sendLadderOrder(el.dataset.symbol, Number(el.dataset.price),
         Number(el.dataset.tick));
     });
   }
+  for (const input of document.querySelectorAll('.price-input')) {
+    const sym = input.dataset.symbol;
+    updateOrderHint(sym);
+    input.addEventListener('input', () => {
+      priceDrafts[sym] = input.value;
+      updateOrderHint(sym);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') buyTypedPrice(sym);
+      else if (e.key === 'ArrowUp') { e.preventDefault(); stepPrice(sym, 1); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); stepPrice(sym, -1); }
+    });
+    if (sym === focusSym) {
+      input.focus();
+      if (caret !== null) input.setSelectionRange(caret, caret);
+    }
+  }
+  for (const btn of document.querySelectorAll('.step-btn')) {
+    btn.addEventListener('click', (e) => {
+      const el = e.currentTarget;
+      stepPrice(el.dataset.symbol, Number(el.dataset.dir));
+    });
+  }
+  for (const btn of document.querySelectorAll('.buy-btn')) {
+    btn.addEventListener('click', (e) => buyTypedPrice(e.currentTarget.dataset.symbol));
+  }
+  for (const btn of document.querySelectorAll('.reset-btn')) {
+    btn.addEventListener('click', (e) => {
+      delete priceDrafts[e.currentTarget.dataset.symbol];
+      renderLadder(window.__lastLadder);
+    });
+  }
+}
+
+// --- typed-in price ---------------------------------------------------------
+
+/** What the user has typed per symbol; absent means "use the bid". */
+const priceDrafts = {};
+
+const priceDecimals = (tick) => (tick && tick < 0.01 ? 3 : 2);
+
+function snapToTick(price, tick) {
+  const t = tick > 0 ? tick : 0.01;
+  return Math.round(price / t) * t;
+}
+
+function priceInput(sym) {
+  return document.querySelector(`.price-input[data-symbol="${CSS.escape(sym)}"]`);
+}
+
+function stepPrice(sym, dir) {
+  const input = priceInput(sym);
+  if (!input) return;
+  const tick = Number(input.dataset.tick) || 0.01;
+  const current = Number(input.value);
+  const base = Number.isFinite(current) && current > 0
+    ? current : (window.__lastLadder?.symbols?.[sym]?.quote?.bid || 0);
+  if (!base) return;
+  const next = snapToTick(base + dir * tick, tick);
+  if (next <= 0) return;
+  input.value = next.toFixed(priceDecimals(tick));
+  priceDrafts[sym] = input.value;
+  updateOrderHint(sym);
+}
+
+/** Say what the typed price will do before anything is clicked. */
+function updateOrderHint(sym) {
+  const hint = $(`hint-${sym}`);
+  const input = priceInput(sym);
+  if (!hint || !input) return;
+  const tick = Number(input.dataset.tick) || 0.01;
+  const price = Number(input.value);
+  const q = window.__lastLadder?.symbols?.[sym]?.quote || {};
+  hint.className = 'order-hint';
+  if (!input.value.trim() || !Number.isFinite(price) || price <= 0) {
+    hint.textContent = 'Enter a price.';
+    hint.classList.add('order-hint-bad');
+  } else if (q.ask && price >= q.ask) {
+    hint.textContent = `Fills now at the market — ask is ${fmtPrice(q.ask, tick)}.`;
+    hint.classList.add('order-hint-warn');
+  } else {
+    const ref = q.last || q.bid;
+    const pct = ref ? ` (${(((price - ref) / ref) * 100).toFixed(2)}% from last)` : '';
+    hint.textContent = `Rests until the price comes down to ${fmtPrice(price, tick)}${pct}.`;
+  }
+}
+
+function buyTypedPrice(sym) {
+  const input = priceInput(sym);
+  if (!input) return;
+  const tick = Number(input.dataset.tick) || 0.01;
+  const typed = Number(input.value);
+  if (!Number.isFinite(typed) || typed <= 0) {
+    updateOrderHint(sym);
+    input.focus();
+    return;
+  }
+  // Brokers reject off-grid prices; snap and show the snapped value.
+  const price = Number(snapToTick(typed, tick).toFixed(6));
+  input.value = price.toFixed(priceDecimals(tick));
+  priceDrafts[sym] = input.value;
+  sendLadderOrder(sym, price, tick);
 }
 
 async function sendLadderOrder(symbol, price, tick) {
@@ -1227,7 +1367,11 @@ async function refresh() {
 function setBusy(state) {
   busy = state;
   for (const id of ['btn-long', 'btn-short', 'btn-flat']) $(id).disabled = state;
-  for (const btn of document.querySelectorAll('.rung')) btn.disabled = state;
+  for (const btn of document.querySelectorAll(
+    '.rung, .buy-btn, .buy-now-btn, .step-btn, .reset-btn')) {
+    btn.disabled = state || (btn.classList.contains('buy-now-btn')
+      && !Number(btn.dataset.price));
+  }
 }
 
 function askConfirm(title, body) {

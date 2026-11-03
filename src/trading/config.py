@@ -200,7 +200,7 @@ class Settings:
     #: Rungs are placed at HIGH/LOW of day plus or minus N steps. Each rung is
     #: a plain resting BUY limit order at exactly that price.
     ladder_enabled: bool = True
-    ladder_levels: int = 5
+    ladder_levels: int = 2
     ladder_steps: dict[str, float] = field(default_factory=dict)
     ladder_ticks: dict[str, float] = field(default_factory=dict)
     #: Fat-finger guard: a rung price further than this from the last trade is
@@ -622,7 +622,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         require_mismatch_ack=_bool("REQUIRE_MISMATCH_ACK", True),
         max_daily_commands=_int("MAX_DAILY_COMMANDS", 50),
         ladder_enabled=_bool("LADDER_ENABLED", True),
-        ladder_levels=_int("LADDER_LEVELS", 5),
+        ladder_levels=_int("LADDER_LEVELS", 2),
         ladder_steps=ladder_steps,
         ladder_ticks=ladder_ticks,
         ladder_max_deviation_pct=_float("LADDER_MAX_DEVIATION_PCT", 10.0),

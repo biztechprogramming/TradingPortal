@@ -200,7 +200,7 @@ order rather than adding a second one.
 | Variable | Default | Why you might change it |
 |---|---|---|
 | `LADDER_ENABLED` | true | Set false to hide the ladder entirely |
-| `LADDER_LEVELS` | 5 | Rungs either side of each anchor. Capped at 20 |
+| `LADDER_LEVELS` | 2 | Rungs either side of each anchor. Capped at 20 |
 | `LADDER_STEP_QQQ` | 0.10 | Rung spacing for the long symbol |
 | `LADDER_STEP_PSQ` | 0.005 | Rung spacing for the short symbol |
 | `LADDER_TICK_<SYM>` | min(step, `TICK_SIZE`) | The venue increment rungs snap to. Only set this if your venue's tick differs from a penny |

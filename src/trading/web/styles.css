@@ -343,6 +343,31 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .rung-marketable { border-left: 3px solid var(--amber); }
 .rung-working    { border-color: var(--green); background: #14251c; }
 
+/* --- typed-in price ----------------------------------------------------- */
+.order-entry { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.order-row { display: flex; gap: 6px; align-items: stretch; }
+.price-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.price-input:focus { outline: none; border-color: var(--blue); }
+.step-btn { min-width: 34px; font-size: 16px; }
+.buy-btn { border-color: var(--blue); }
+.order-hint { font-size: 12.5px; color: var(--muted); }
+.order-hint-warn { color: var(--amber); }
+.order-hint-bad  { color: var(--red, #e5534b); }
+.buy-now-btn { border-left: 3px solid var(--amber); text-align: left; }
+
 .pill-warn   { background: var(--amber); color: #1a1000; }
 .pill-anchor { background: var(--blue); color: #04121f; }
 

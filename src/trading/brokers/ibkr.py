@@ -461,19 +461,38 @@ class IBKRBroker(Broker):
                         continue
             return 0.0
 
+        # The ledger has no buying power or available funds at all; those
+        # live in the account summary. Reading them from the ledger gave 0.
+        summary = self._account_summary()
         settled = num("settledcash")
-        available = num("availablefunds", "cashbalance")
+        available = summary.get("availablefunds") or num("availablefunds", "cashbalance")
         # Cash-only means we spend settled cash, not funds that only exist
         # because IBKR is willing to lend against the portfolio.
         cash_available = min(available, settled) if settled > 0 else available
 
         return Balances(
             cash_available=cash_available,
-            buying_power=num("buyingpower", "availablefunds"),
+            buying_power=summary.get("buyingpower") or cash_available,
             cash_balance=num("cashbalance"),
             settled_cash=settled or None,
             currency="USD",
         )
+
+    def _account_summary(self) -> dict[str, float]:
+        """``{"buyingpower": 620.44, ...}`` from /summary; empty if unavailable."""
+        try:
+            raw = self._request("GET", f"/portfolio/{self._acct_id}/summary") or {}
+        except Exception as exc:
+            log.debug("IBKR account summary unavailable: %s", exc)
+            return {}
+        out: dict[str, float] = {}
+        for key in ("buyingpower", "availablefunds"):
+            entry = raw.get(key) if isinstance(raw, dict) else None
+            amount = entry.get("amount") if isinstance(entry, dict) else entry
+            value = _num(amount)
+            if value > 0:
+                out[key] = value
+        return out
 
     # --- contracts & quotes ----------------------------------------------
 

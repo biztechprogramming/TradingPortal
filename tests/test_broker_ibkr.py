@@ -130,19 +130,40 @@ def test_delayed_quotes_are_refused_unless_opted_in(tmp_path):
 
 
 def test_ledger_prefers_settled_cash(tmp_path):
+    """Shapes as IBKR really sends them: the ledger has no buying power.
+
+    Buying power and available funds come from /summary, as {"amount": n}.
+    Reading them from the ledger reported a buying power of 0.
+    """
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/summary"):
+            return httpx.Response(200, json={
+                "availablefunds": {"amount": 24_000.0},
+                "buyingpower": {"amount": 96_000.0},
+            })
         assert request.url.path.endswith("/ledger")
         return httpx.Response(200, json={"USD": {
             "cashbalance": 25_000.0,
             "settledcash": 20_000.0,
-            "availablefunds": 24_000.0,
-            "buyingpower": 96_000.0,
         }})
 
     balances = broker_with(handler, tmp_path).get_available_cash()
     # Cash-only means the settled figure wins over the marginable one.
     assert balances.cash_available == 20_000.0
     assert balances.buying_power == 96_000.0
+
+
+def test_buying_power_falls_back_to_cash_without_a_summary(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/summary"):
+            return httpx.Response(500, json={})
+        return httpx.Response(200, json={"USD": {
+            "cashbalance": 620.44, "settledcash": 620.44,
+        }})
+
+    balances = broker_with(handler, tmp_path).get_available_cash()
+    assert balances.cash_available == 620.44
+    assert balances.buying_power == 620.44       # never a misleading 0
 
 
 def test_positions_paginate(tmp_path):

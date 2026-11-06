@@ -227,6 +227,11 @@ def test_order_payload_shape():
     assert sell["orderLegCollection"][0]["instruction"] == "SELL"
 
 
+def test_extended_hours_order_is_seamless():
+    payload = build_order_payload("PSQ", Side.BUY, 5, 27.91, extended_hours=True)
+    assert payload["session"] == "SEAMLESS" and payload["duration"] == "DAY"
+
+
 def test_order_id_comes_from_the_location_header(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":

@@ -241,6 +241,7 @@ class TradingService:
             "generated_at": time.time(),
             "market": {
                 "open": market.is_open,
+                "session": market.session,
                 "reason": market.reason,
                 "now_eastern": market.now_eastern,
             },

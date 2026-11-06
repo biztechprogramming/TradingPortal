@@ -28,6 +28,10 @@ except Exception:  # pragma: no cover - tzdata missing on minimal images
 
 REGULAR_OPEN = dtime(9, 30)
 REGULAR_CLOSE = dtime(16, 0)
+#: Pre-market opens and after-hours closes, Eastern. Orders placed in these
+#: windows are flagged for extended hours; see :func:`wants_outside_rth`.
+EXTENDED_OPEN = dtime(4, 0)
+EXTENDED_CLOSE = dtime(20, 0)
 
 #: Full-day US equity market closures. Half-days (1pm close) are not encoded;
 #: see docs/SAFETY.md for why the guard is deliberately approximate.
@@ -42,6 +46,8 @@ class MarketStatus:
     is_open: bool
     reason: str
     now_eastern: str
+    #: "regular", "extended" (pre-market or after hours) or "closed".
+    session: str = "closed"
 
 
 def market_status(now: datetime | None = None) -> MarketStatus:
@@ -63,21 +69,35 @@ def market_status(now: datetime | None = None) -> MarketStatus:
         return MarketStatus(False, "weekend", stamp)
     if eastern.strftime("%Y-%m-%d") in MARKET_HOLIDAYS_2026:
         return MarketStatus(False, "market holiday", stamp)
-    if not (REGULAR_OPEN <= eastern.time() < REGULAR_CLOSE):
-        return MarketStatus(False, "outside 09:30-16:00 ET regular session", stamp)
-    return MarketStatus(True, "regular session", stamp)
+    now_t = eastern.time()
+    if REGULAR_OPEN <= now_t < REGULAR_CLOSE:
+        return MarketStatus(True, "regular session", stamp, "regular")
+    if EXTENDED_OPEN <= now_t < REGULAR_OPEN:
+        return MarketStatus(False, "pre-market extended hours", stamp, "extended")
+    if REGULAR_CLOSE <= now_t < EXTENDED_CLOSE:
+        return MarketStatus(False, "after-hours extended session", stamp, "extended")
+    return MarketStatus(False, "outside 04:00-20:00 ET trading hours", stamp)
+
+
+def wants_outside_rth(settings: Settings, now: datetime | None = None) -> bool:
+    """Whether an order placed now must be flagged for extended hours.
+
+    Brokers hold a regular-session-only order until the open, so one placed
+    pre-market or after hours has to say it may fill outside regular hours.
+    """
+    return settings.allow_outside_rth or market_status(now).session == "extended"
 
 
 def check_market_hours(settings: Settings, now: datetime | None = None) -> None:
-    """Refuse to trade outside regular hours unless explicitly permitted.
+    """Refuse to trade when no session is running unless explicitly permitted.
 
-    ETF liquidity outside the regular session is thin and spreads widen
-    sharply, which is exactly the condition a marketable limit handles worst.
+    Extended hours are allowed; those orders go out flagged outside-RTH.
+    Liquidity there is thin and spreads wide, so the orders are limits.
     """
     if not settings.market_hours_guard or settings.allow_outside_rth:
         return
     status = market_status(now)
-    if not status.is_open:
+    if status.session == "closed":
         raise MarketClosed(
             f"Market is closed ({status.reason}, now {status.now_eastern}). "
             "Set ALLOW_OUTSIDE_RTH=true to override, or MARKET_HOURS_GUARD=false "

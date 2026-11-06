@@ -64,6 +64,7 @@ from ..models import (
     Side,
 )
 from ..performance import SOURCE_BROKER, NavPoint
+from ..validation import wants_outside_rth
 from .base import Broker, normalize_state
 
 log = logging.getLogger("trading.broker.ibkr")
@@ -663,7 +664,7 @@ class IBKRBroker(Broker):
                     "quantity": int(quantity),
                     "price": round(float(limit_price), 2),
                     "tif": "DAY",
-                    "outsideRTH": bool(self.settings.allow_outside_rth),
+                    "outsideRTH": wants_outside_rth(self.settings),
                     "cOID": client_id,   # duplicate-submission guard at IBKR
                 }
             ]
@@ -713,7 +714,7 @@ class IBKRBroker(Broker):
             "quantity": remaining,
             "price": round(float(limit_price), 2),
             "tif": "DAY",
-            "outsideRTH": bool(self.settings.allow_outside_rth),
+            "outsideRTH": wants_outside_rth(self.settings),
         }
         response = self._request(
             "POST",

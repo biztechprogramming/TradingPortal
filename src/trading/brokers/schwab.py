@@ -63,6 +63,7 @@ from ..models import (
     Side,
     Transaction,
 )
+from ..validation import wants_outside_rth
 from .base import Broker, mask_account, normalize_state
 
 #: Activity types worth pulling for NAV reconstruction. Trades move value
@@ -520,7 +521,8 @@ class SchwabBroker(Broker):
     def submit_limit_order(
         self, symbol: str, side: Side, quantity: int, limit_price: float
     ) -> Order:
-        body = build_order_payload(symbol, side, quantity, limit_price)
+        body = build_order_payload(symbol, side, quantity, limit_price,
+                                   wants_outside_rth(self.settings))
         resp = self._request(
             "POST",
             f"/trader/v1/accounts/{self._account_hash}/orders",
@@ -556,7 +558,8 @@ class SchwabBroker(Broker):
                 f"Schwab order {order_id} has nothing left to replace"
             )
         body = build_order_payload(
-            existing.symbol, existing.side, remaining, limit_price
+            existing.symbol, existing.side, remaining, limit_price,
+            wants_outside_rth(self.settings),
         )
         resp = self._request(
             "PUT",
@@ -761,16 +764,21 @@ def _instance_name(login: str, account: Account | None) -> str:
 
 
 def build_order_payload(
-    symbol: str, side: Side, quantity: int, limit_price: float
+    symbol: str, side: Side, quantity: int, limit_price: float,
+    extended_hours: bool = False,
 ) -> dict[str, Any]:
-    """A single-leg equity day limit order, regular session only.
+    """A single-leg equity day limit order.
+
+    ``extended_hours`` sends ``SEAMLESS`` (pre-market, regular and after
+    hours) instead of ``NORMAL``, so a pre-market order can fill now and
+    keep working through the day rather than wait for the open.
 
     ``SELL`` is used rather than ``SELL_SHORT``: this system only ever
     liquidates a long position, never establishes a short.
     """
     return {
         "orderType": "LIMIT",
-        "session": "NORMAL",
+        "session": "SEAMLESS" if extended_hours else "NORMAL",
         "duration": "DAY",
         "orderStrategyType": "SINGLE",
         "price": f"{limit_price:.2f}",

@@ -177,7 +177,9 @@ def test_zero_quantity_positions_are_dropped(tmp_path):
 # --- orders -----------------------------------------------------------------
 
 
-def test_submit_sends_the_expected_payload(tmp_path):
+def test_submit_sends_the_expected_payload(tmp_path, monkeypatch):
+    # Pin the session: the flag depends on the time of day.
+    monkeypatch.setattr("trading.brokers.ibkr.wants_outside_rth", lambda s: False)
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -200,6 +202,19 @@ def test_submit_sends_the_expected_payload(tmp_path):
     assert body["cOID"]                       # broker-side duplicate guard
     assert seen["path"].endswith("/iserver/account/DU1234567/orders")
     assert order.order_id == "123456"
+
+
+def test_extended_hours_order_is_flagged_outside_rth(tmp_path, monkeypatch):
+    monkeypatch.setattr("trading.brokers.ibkr.wants_outside_rth", lambda s: True)
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=[{"order_id": "1",
+                                          "order_status": "PreSubmitted"}])
+
+    broker_with(handler, tmp_path).submit_limit_order("PSQ", Side.BUY, 5, 27.91)
+    assert seen["body"]["orders"][0]["outsideRTH"] is True
 
 
 def test_safe_confirmation_prompt_is_answered(tmp_path):

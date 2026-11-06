@@ -126,7 +126,8 @@ function renderBanner(status) {
   $('mode-text').textContent = label;
   const m = status.market || {};
   $('market-text').textContent =
-    `${m.open ? 'Market open' : 'Market closed'} — ${m.reason} · ${m.now_eastern || ''}`;
+    `${m.open ? 'Market open' : m.session === 'extended' ? 'Extended hours'
+      : 'Market closed'} — ${m.reason} · ${m.now_eastern || ''}`;
 }
 
 function renderCombined(c) {

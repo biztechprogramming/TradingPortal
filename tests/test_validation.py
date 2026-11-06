@@ -109,9 +109,31 @@ def test_market_status_holiday_closed():
     assert market_status(now).reason == "market holiday"
 
 
-def test_market_status_after_hours_closed():
+def test_market_status_after_hours_is_extended():
     now = datetime(2026, 8, 13, 21, 30, tzinfo=timezone.utc)  # 17:30 ET
-    assert not market_status(now).is_open
+    status = market_status(now)
+    assert not status.is_open and status.session == "extended"
+
+
+def test_market_status_pre_market_is_extended():
+    now = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)   # 08:00 ET
+    assert market_status(now).session == "extended"
+
+
+def test_market_status_overnight_is_closed():
+    now = datetime(2026, 8, 14, 1, 0, tzinfo=timezone.utc)    # 21:00 ET
+    assert market_status(now).session == "closed"
+
+
+def test_extended_hours_pass_the_guard_and_flag_the_order(tmp_path):
+    from trading.validation import wants_outside_rth
+
+    s = make_settings(tmp_path, market_hours_guard=True)
+    pre = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)    # 08:00 ET
+    regular = datetime(2026, 8, 13, 14, 0, tzinfo=timezone.utc)
+    check_market_hours(s, pre)                                  # no raise
+    assert wants_outside_rth(s, pre)
+    assert not wants_outside_rth(s, regular)
 
 
 def test_missing_timezone_database_fails_closed(tmp_path, monkeypatch):
@@ -141,7 +163,7 @@ def test_missing_timezone_database_fails_closed(tmp_path, monkeypatch):
 
 
 def test_guard_blocks_and_can_be_overridden(tmp_path):
-    closed = datetime(2026, 8, 15, 14, 0, tzinfo=timezone.utc)
+    closed = datetime(2026, 8, 15, 14, 0, tzinfo=timezone.utc)   # Saturday
     s = make_settings(tmp_path, market_hours_guard=True)
     with pytest.raises(MarketClosed):
         check_market_hours(s, closed)

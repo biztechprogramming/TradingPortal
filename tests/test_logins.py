@@ -364,3 +364,64 @@ def test_schwab_login_errors_are_400s(client):
     assert res.status_code == 400 and "SCHWAB_LOGINS" in res.json()["detail"]
     res = client.post("/api/logins/schwab/paste", headers=AUTH, json={"url": "x"})
     assert res.status_code == 400
+
+
+# --- live login status -------------------------------------------------------
+
+
+class _FakeSchwab:
+    broker_type = "schwab"
+
+    def __init__(self, login, connected=True, last_error=None, warning=None):
+        self.login = login
+        self.connected = connected
+        self.last_error = last_error
+        if warning:
+            self.warning = warning
+
+
+class _Wrapper:
+    """Stands in for ReadOnlyBroker/ShadowBroker, which hide the login."""
+    broker_type = "schwab"
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.connected = inner.connected
+        self.last_error = inner.last_error
+        self.warning = getattr(inner, "warning", None)
+
+
+def _ok(login):
+    return {"login": login, "state": "ok", "days_left": 6.9}
+
+
+def test_working_login_stays_ok():
+    from trading.api import _live_login_status
+
+    brokers = {"a": _Wrapper(_FakeSchwab("andrew"))}
+    assert _live_login_status(_ok("andrew"), brokers)["state"] == "ok"
+
+
+def test_token_schwab_rejected_is_not_shown_as_ok():
+    """Days left said OK while every call failed: that hid a dead login."""
+    from trading.api import _live_login_status
+
+    err = "Schwab token refresh rejected (HTTP 400)."
+    brokers = {"a": _FakeSchwab("andrew", connected=False, last_error=err)}
+    out = _live_login_status(_ok("andrew"), brokers)
+    assert out["state"] == "rejected" and out["detail"] == err
+
+
+def test_login_with_no_accounts_is_rejected():
+    from trading.api import _live_login_status
+
+    out = _live_login_status(_ok("andrew"), {})
+    assert out["state"] == "rejected"
+
+
+def test_login_sharing_an_account_is_flagged():
+    from trading.api import _live_login_status
+
+    brokers = {"a": _Wrapper(_FakeSchwab("anastasia", warning="both reach ...1354"))}
+    out = _live_login_status(_ok("anastasia"), brokers)
+    assert out["state"] == "shared" and "1354" in out["detail"]

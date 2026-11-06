@@ -170,6 +170,35 @@ def test_dry_run_still_shadows_every_account(tmp_path, discovered):
         assert isinstance(inner, ShadowBroker)
 
 
+def test_two_logins_on_one_account_block_trading_it(tmp_path, monkeypatch):
+    """A login authorised as the wrong person duplicates an account.
+
+    Left tradable, every order goes to that account once per login.
+    """
+    shared = Account("HASH-X", "...1354", is_paper=False)
+    monkeypatch.setattr(
+        "trading.brokers.factory.discover_accounts",
+        lambda broker_type, settings: [
+            ("andrew", shared), ("anastasia", shared),
+            ("anastasia", Account("HASH-Y", "...5057", is_paper=False)),
+        ],
+    )
+    s = make_settings(
+        tmp_path, mode=TradingMode.DRY_RUN, live_trading_enabled=False,
+        brokers_enabled=("schwab",), schwab_app_key="k", schwab_app_secret="s",
+        schwab_logins=("andrew", "anastasia"), show_readonly_accounts=False,
+    )
+    brokers = build_brokers(s)
+
+    # Still shown (so the problem is visible) but neither copy can trade.
+    assert brokers["schwab:andrew:1354"].read_only
+    assert brokers["schwab:anastasia:1354"].read_only
+    assert "both reach account ...1354" in brokers["schwab:andrew:1354"].warning
+    assert not brokers["schwab:anastasia:5057"].read_only
+    with pytest.raises(AccountNotTradable, match="both reach this account"):
+        brokers["schwab:andrew:1354"].submit_limit_order("PSQ", Side.BUY, 1, 1.0)
+
+
 # --- the read-only wrapper ---------------------------------------------------
 
 

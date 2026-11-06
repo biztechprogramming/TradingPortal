@@ -1188,6 +1188,8 @@ function loginPill(state) {
     missing: '<span class="pill pill-bad">NOT LOGGED IN</span>',
     unreadable: '<span class="pill pill-bad">UNREADABLE</span>',
     unknown: '<span class="pill pill-warn">AGE UNKNOWN</span>',
+    rejected: '<span class="pill pill-bad">REJECTED — LOG IN AGAIN</span>',
+    shared: '<span class="pill pill-bad">SAME ACCOUNT AS ANOTHER LOGIN</span>',
   }[state] || '';
 }
 
@@ -1202,8 +1204,9 @@ function renderLogins(data) {
       <span class="login-detail muted">Set SCHWAB_APP_KEY and SCHWAB_APP_SECRET in .env first.</span></div>`);
   } else if (schwab.enabled) {
     for (const l of schwab.logins || []) {
-      const left = l.days_left === null || l.days_left === undefined
-        ? '' : l.days_left > 0 ? `${l.days_left.toFixed(1)} days left` : '';
+      const left = l.detail ? esc(l.detail)
+        : l.days_left === null || l.days_left === undefined
+          ? '' : l.days_left > 0 ? `${l.days_left.toFixed(1)} days left` : '';
       const label = schwab.logins.length > 1 ? `Schwab · ${esc(l.login)}` : 'Schwab';
       rows.push(`<div class="login-row">
         <span class="login-name">${label}</span>

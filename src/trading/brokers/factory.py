@@ -124,6 +124,23 @@ def apply_permissions(broker: Broker, settings: Settings, account: Account) -> B
     return ReadOnlyBroker(broker, settings)
 
 
+def _block_shared_account(
+    broker: Broker, settings: Settings, account: Account, logins: list[str]
+) -> Broker:
+    names = " and ".join(repr(l) for l in logins)
+    message = (
+        f"Logins {names} both reach account {account.display_id}, so trading "
+        "it is blocked: every order would be sent there twice. One of those "
+        "logins was authorised as the wrong person. Log in again in a private "
+        "browser window, signed in to Schwab as the right person."
+    )
+    log.error("%s", message)
+    return ReadOnlyBroker(
+        broker, settings,
+        reason=f"logins {names} both reach this account", warning=message,
+    )
+
+
 # --- entry points ------------------------------------------------------------
 
 
@@ -195,16 +212,26 @@ def build_brokers(settings: Settings) -> dict[str, Broker]:
             brokers[fallback.name] = fallback
             continue
 
+        # Two logins reaching one account means one was authorised as the
+        # wrong person. Trading it would send every order there twice.
+        logins_by_account: dict[str, set[str]] = {}
         for login, account in pairs:
+            logins_by_account.setdefault(account.account_id, set()).add(login)
+
+        for login, account in pairs:
+            sharing = sorted(logins_by_account[account.account_id])
+            duplicated = len(sharing) > 1
             tradable = settings.may_trade_account(
                 account.display_id or account.account_id
             )
-            if not tradable and not settings.show_readonly_accounts:
+            if not tradable and not duplicated and not settings.show_readonly_accounts:
                 continue
 
             adapter = _build_adapter(broker_type, settings, login, account)
             adapter = apply_mode(adapter, settings)
             adapter = apply_permissions(adapter, settings, account)
+            if duplicated:
+                adapter = _block_shared_account(adapter, settings, account, sharing)
             if adapter.name in brokers:
                 # Silently overwriting would drop an account from every
                 # command and every total, so refuse instead.
@@ -236,6 +263,8 @@ def verify_environment(broker: Broker, settings: Settings) -> list[str]:
     merely surprising.
     """
     warnings: list[str] = []
+    if getattr(broker, "warning", None):
+        warnings.append(broker.warning)
     acct = broker.account
     if acct is None:
         return warnings

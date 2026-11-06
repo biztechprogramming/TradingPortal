@@ -24,13 +24,19 @@ class AccountNotTradable(TradingError):
 class ReadOnlyBroker(Broker):
     """Delegates every read; refuses every write."""
 
-    def __init__(self, inner: Broker, settings: Settings, reason: str = "") -> None:
+    def __init__(
+        self, inner: Broker, settings: Settings, reason: str = "",
+        warning: str | None = None,
+    ) -> None:
         super().__init__(settings)
         self.inner = inner
         self.name = inner.name
         self.reason = reason or (
             "this account is not on the TRADING_ACCOUNTS allowlist"
         )
+        #: Shown on the dashboard when set: read-only because something is
+        #: wrong, not because the operator chose it.
+        self.warning = warning
 
     # --- identity ---------------------------------------------------------
 
@@ -99,9 +105,10 @@ class ReadOnlyBroker(Broker):
 
     def _refuse(self, what: str) -> None:
         account = self.account.display_id if self.account else "unknown"
+        hint = "" if self.warning else " Add it to TRADING_ACCOUNTS to allow trading."
         raise AccountNotTradable(
-            f"{what} refused for {self.name} (account {account}): {self.reason}. "
-            "Add it to TRADING_ACCOUNTS to allow trading."
+            f"{what} refused for {self.name} (account {account}): "
+            f"{self.reason}.{hint}"
         )
 
     def submit_limit_order(

@@ -486,7 +486,9 @@ def create_app(
                 ),
                 "callback_url": settings.schwab_callback_url,
                 "logins": [
-                    schwab_token_status(settings, login)
+                    _live_login_status(
+                        schwab_token_status(settings, login), service.brokers
+                    )
                     for login in settings.schwab_logins
                 ],
                 "flow": schwab_login.status(),
@@ -525,6 +527,42 @@ def create_app(
         return ibkr_restart.logout()
 
     return app
+
+
+def _broker_login(broker: Any) -> str | None:
+    """The Schwab login behind a broker, looking through mode/permission wrappers."""
+    for _ in range(4):
+        login = getattr(broker, "login", None)
+        if login:
+            return login
+        broker = getattr(broker, "inner", None) or getattr(broker, "real", None)
+        if broker is None:
+            return None
+    return None
+
+
+def _live_login_status(status: dict[str, Any], brokers: dict[str, Any]) -> dict[str, Any]:
+    """Correct a token's age-based status with what Schwab actually said.
+
+    Days left only says the token is not *expired*. Schwab can still reject
+    it (re-authorised elsewhere, revoked), and two logins can turn out to
+    reach the same account. Either way the panel must not say OK.
+    """
+    if status.get("state") not in ("ok", "expiring", "unknown"):
+        return status
+    mine = [b for b in brokers.values()
+            if b.broker_type == "schwab" and _broker_login(b) == status["login"]]
+    shared = next((b.warning for b in mine if getattr(b, "warning", None)), None)
+    if shared:
+        return {**status, "state": "shared", "detail": shared}
+    if not mine:
+        return {**status, "state": "rejected",
+                "detail": "Schwab returned no accounts for this login. Log in again."}
+    if not any(b.connected for b in mine):
+        error = next((b.last_error for b in mine if b.last_error), None)
+        if error:
+            return {**status, "state": "rejected", "detail": error}
+    return status
 
 
 def _alias(payload: CommandRequest | None, command: str) -> CommandRequest:

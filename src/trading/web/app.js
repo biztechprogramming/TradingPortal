@@ -104,8 +104,12 @@ function setAlerts(items) {
 }
 
 async function acknowledge() {
-  if (!confirm('Acknowledge the broker mismatch? Do this only after you have '
-    + 'checked BOTH accounts and confirmed their real positions.')) return;
+  // The dashboard's own dialog, not confirm(): a browser that suppresses
+  // pop-ups answers confirm() with "Cancel" and the click silently does nothing.
+  if (!await askConfirm('Acknowledge the broker mismatch?',
+    '<p>This only clears the warning and unblocks trading. It places, retries '
+    + 'and cancels nothing.</p><p>Do it after you have checked each account\'s '
+    + 'real positions.</p>')) return;
   await api('/api/acknowledge', {
     method: 'POST',
     body: JSON.stringify({ note: 'acknowledged from dashboard' }),
@@ -182,9 +186,16 @@ function renderBrokers(status) {
         const held = qty(b, sym);
         const last = fills[sym];
         const tick = window.__lastLadder?.symbols?.[sym]?.tick;
+        // Say when, and whether it was a sale: "950 @ $26.21" alone reads
+        // like a current figure when it may be weeks old.
+        const when = last?.at
+          ? new Date(last.at * 1000).toLocaleDateString('en-US',
+              { month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+          : '';
         const lastCell = last
-          ? `${fmtNum(last.shares)} <span class="muted">@ ${
-              fmtPrice(last.price, tick)}</span>`
+          ? `${last.side === 'SELL' ? 'sold ' : ''}${fmtNum(last.shares)}
+             <span class="muted">@ ${fmtPrice(last.price, tick)}${
+               when ? ` · ${when}` : ''}</span>`
           : '<span class="muted">—</span>';
         return `<tr>
           <td>${esc(sym)}</td>
@@ -1321,13 +1332,15 @@ async function submitPastedUrl() {
 }
 
 async function restartIbkr() {
-  if (!confirm('Log in to IBKR? An approval will be sent to your phone.')) return;
+  if (!await askConfirm('Log in to IBKR?',
+    '<p>An approval will be sent to your phone.</p>')) return;
   await api('/api/logins/ibkr/restart', { method: 'POST' });
   refreshLogins();
 }
 
 async function logoutIbkr() {
-  if (!confirm('Log out of IBKR? IBKR accounts disappear from the dashboard; charts keep using Schwab.')) return;
+  if (!await askConfirm('Log out of IBKR?',
+    '<p>IBKR accounts disappear from the dashboard; charts keep using Schwab.</p>')) return;
   await api('/api/logins/ibkr/logout', { method: 'POST' });
   refreshLogins();
 }

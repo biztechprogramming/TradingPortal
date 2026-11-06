@@ -89,6 +89,9 @@ class ReadOnlyBroker(Broker):
     def get_transactions(self, start, end):
         return self.inner.get_transactions(start, end)
 
+    def get_recent_fills(self, days: int = 30):
+        return self.inner.get_recent_fills(days)
+
     def get_price_history(self, symbol, start, end):
         return self.inner.get_price_history(symbol, start, end)
 

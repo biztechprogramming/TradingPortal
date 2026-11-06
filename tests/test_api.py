@@ -229,3 +229,49 @@ def test_history_endpoint(client):
     client.post("/api/command", headers=AUTH, json={"command": "GO_LONG"})
     history = client.get("/api/history", headers=AUTH).json()["history"]
     assert history[-1]["command"] == "GO_LONG"
+
+
+# --- last fills ---------------------------------------------------------------
+
+
+def test_last_fills_prefer_the_broker_and_drop_gone_accounts(settings):
+    """Broker order history wins over this app's own records.
+
+    The app's history misses ladder fills and trades made on the broker's
+    site, and it keeps rows for accounts that no longer exist.
+    """
+    from trading.models import Order, OrderState, Side
+    from trading.orchestrator import TradingService
+    from tests.conftest import make_broker
+
+    schwab = make_broker(settings, "schwab", cash=1.0)
+    ibkr = make_broker(settings, "ibkr", cash=1.0)
+    schwab.get_recent_fills = lambda days=30: [
+        Order("1", "PSQ", Side.BUY, 5040, 27.85, OrderState.FILLED,
+              filled_quantity=5040, average_fill_price=27.8485,
+              updated_at=1_800_000_000.0),
+        Order("0", "PSQ", Side.BUY, 966, 26.21, OrderState.FILLED,
+              filled_quantity=966, average_fill_price=26.21,
+              updated_at=1_700_000_000.0),
+    ]
+    ibkr.get_recent_fills = lambda days=30: None    # cannot list fills
+    service = TradingService(settings, brokers={"schwab": schwab, "ibkr": ibkr})
+    service.state.data.history = [{
+        "command": "GO_SHORT", "finished_at": 1_700_000_000.0,
+        "results": [
+            {"broker": "schwab", "fills": [{"symbol": "PSQ", "filled_quantity": 966,
+                                            "average_price": 26.21, "side": "BUY"}]},
+            {"broker": "ibkr", "fills": [{"symbol": "PSQ", "filled_quantity": 10,
+                                          "average_price": 26.0, "side": "BUY"}]},
+            {"broker": "schwab:gone:1354", "fills": [{"symbol": "PSQ",
+                                                      "filled_quantity": 5205,
+                                                      "average_price": 26.21,
+                                                      "side": "BUY"}]},
+        ],
+    }]
+
+    fills = service.last_fills()
+    assert set(fills) == {"schwab", "ibkr"}
+    assert fills["schwab"]["PSQ"]["shares"] == 5040            # newest broker fill
+    assert fills["schwab"]["PSQ"]["price"] == 27.8485
+    assert fills["ibkr"]["PSQ"]["shares"] == 10                # history fallback

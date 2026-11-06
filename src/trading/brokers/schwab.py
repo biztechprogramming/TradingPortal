@@ -510,6 +510,30 @@ class SchwabBroker(Broker):
         orders = [_parse_order(o, self.name) for o in (resp.json() or [])]
         return [o for o in orders if o.state.is_open]
 
+    def get_recent_fills(self, days: int = 30) -> list[Order] | None:
+        """Every order with shares filled, from Schwab's own order history.
+
+        Includes orders placed on schwab.com, not just this app's.
+        """
+        if not self._account_hash:
+            raise BrokerAuthError("Schwab broker is not connected")
+        now = time.time()
+        resp = self._request(
+            "GET", f"/trader/v1/accounts/{self._account_hash}/orders",
+            params={
+                "fromEnteredTime": _iso(now - days * 86400),
+                "toEnteredTime": _iso(now + 86400),
+                "maxResults": 500,
+            },
+        )
+        fills = []
+        for raw in resp.json() or []:
+            order = _parse_order(raw, self.name)
+            if order.filled_quantity > 0 and order.symbol:
+                order.updated_at = _last_execution_time(raw) or order.updated_at
+                fills.append(order)
+        return fills
+
     def get_order_status(self, order_id: str) -> Order:
         resp = self._request(
             "GET", f"/trader/v1/accounts/{self._account_hash}/orders/{order_id}"
@@ -930,6 +954,31 @@ def _parse_quote(symbol: str, entry: dict[str, Any]) -> Quote:
         day_high=float(quote.get("highPrice", 0) or 0),
         day_low=float(quote.get("lowPrice", 0) or 0),
     )
+
+
+def _last_execution_time(raw: dict[str, Any]) -> float | None:
+    """Epoch of an order's latest execution, else its close time."""
+    from datetime import datetime
+
+    stamps = [
+        leg.get("time")
+        for activity in raw.get("orderActivityCollection") or []
+        for leg in activity.get("executionLegs") or []
+    ] + [raw.get("closeTime")]
+    best = None
+    for stamp in stamps:
+        if not stamp:
+            continue
+        try:
+            # Schwab writes "+0000"; fromisoformat wants "+00:00".
+            text = str(stamp).replace("Z", "+00:00")
+            if len(text) > 5 and text[-5] in "+-" and text[-3] != ":":
+                text = text[:-2] + ":" + text[-2:]
+            value = datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            continue
+        best = value if best is None else max(best, value)
+    return best
 
 
 def _iso(epoch: float) -> str:

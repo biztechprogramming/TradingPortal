@@ -121,6 +121,13 @@ class Broker(abc.ABC):
         """Cash and trade activity, for reconstructing NAV history."""
         return None
 
+    def get_recent_fills(self, days: int = 30) -> list[Order] | None:
+        """Orders that filled at least partly, however they were placed.
+
+        ``updated_at`` on each is the time of its last execution.
+        """
+        return None
+
     def get_price_history(
         self, symbol: str, start: date, end: date
     ) -> dict[str, float] | None:

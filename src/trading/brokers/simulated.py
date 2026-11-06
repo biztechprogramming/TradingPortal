@@ -456,6 +456,10 @@ class ShadowBroker(Broker):
         )
         return quote
 
+    def get_recent_fills(self, days: int = 30):
+        # Real fills are real history; dry run only shadows new orders.
+        return self.real.get_recent_fills(days)
+
     def get_price_bars(
         self,
         symbol: str,

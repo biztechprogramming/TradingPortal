@@ -89,6 +89,8 @@ class TradingService:
         #: :meth:`display_quote`.
         self._quote_memo: dict[str, tuple[float, Any, str | None]] = {}
         self._quote_memo_lock = threading.Lock()
+        #: account name -> (fetched_at, fills by symbol or None if unsupported)
+        self._fills_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self.backfiller = Backfiller(settings, self.nav, self.audit)
         self._nav_recorded: dict[str, str] = {}
 
@@ -134,6 +136,7 @@ class TradingService:
                         pass
             with self._quote_memo_lock:
                 self._quote_memo.clear()
+            self._fills_cache.clear()
             return self.connect_all()
 
     def display_quote(self, broker: Broker, symbol: str) -> tuple[Any, str | None]:
@@ -398,7 +401,51 @@ class TradingService:
         brokers = list(self.brokers.values())
         return self.candles.series(brokers, symbol, days=days, refresh=refresh)
 
+    #: Broker order history changes rarely; the dashboard polls every 10s.
+    FILLS_TTL_SECONDS = 60.0
+
     def last_fills(self) -> dict[str, dict[str, Any]]:
+        """Most recent fill per account per symbol, for the current accounts.
+
+        The broker's own order history wins: it includes ladder orders, which
+        return before filling, and trades placed outside this app. A broker
+        that cannot list fills falls back to this app's command history.
+        """
+        history = self._history_fills()
+        out: dict[str, dict[str, Any]] = {}
+        for name, broker in self.brokers.items():
+            fills = self._broker_fills(name, broker)
+            out[name] = fills if fills is not None else history.get(name, {})
+        return out
+
+    def _broker_fills(self, name: str, broker: Broker) -> dict[str, Any] | None:
+        cached = self._fills_cache.get(name)
+        if cached and time.time() - cached[0] < self.FILLS_TTL_SECONDS:
+            return cached[1]
+        if not broker.connected:
+            return cached[1] if cached else None
+        try:
+            orders = broker.get_recent_fills()
+        except Exception as exc:
+            log.debug("%s: recent fills unavailable: %s", name, exc)
+            return cached[1] if cached else None
+        result: dict[str, Any] | None = None
+        if orders is not None:
+            result = {}
+            for order in sorted(orders, key=lambda o: o.updated_at, reverse=True):
+                if order.symbol in result:
+                    continue
+                result[order.symbol] = {
+                    "shares": order.filled_quantity,
+                    "price": order.average_fill_price,
+                    "side": order.side.value,
+                    "at": order.updated_at,
+                    "command": "broker",
+                }
+        self._fills_cache[name] = (time.time(), result)
+        return result
+
+    def _history_fills(self) -> dict[str, dict[str, Any]]:
         """Most recent fill per broker per symbol, from the command history.
 
         Walks history newest-first and keeps the first hit for each

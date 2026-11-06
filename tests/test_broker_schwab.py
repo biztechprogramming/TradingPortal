@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -386,3 +387,41 @@ def test_account_selection_matches_on_last_four(tmp_path):
 
     broker = broker_with(handler, tmp_path, schwab_account_number="222222222")
     assert broker._select_account(broker.get_accounts()).account_id == "B"
+
+
+# --- recent fills -------------------------------------------------------------
+
+
+def test_recent_fills_come_from_schwab_order_history(tmp_path):
+    """Includes orders placed outside the app; skips orders that never filled."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/accounts/HASH123/orders")
+        return httpx.Response(200, json=[
+            {   # filled in two executions; average and time come from the legs
+                "orderId": 1, "status": "FILLED", "quantity": 5040,
+                "filledQuantity": 5040, "price": 27.85,
+                "orderLegCollection": [{"instruction": "BUY",
+                                        "instrument": {"symbol": "PSQ"}}],
+                "orderActivityCollection": [{"executionLegs": [
+                    {"quantity": 2000, "price": 27.84,
+                     "time": "2026-11-06T14:21:02+0000"},
+                    {"quantity": 3040, "price": 27.855,
+                     "time": "2026-11-06T14:21:03+0000"},
+                ]}],
+            },
+            {   # rejected: never a fill
+                "orderId": 2, "status": "REJECTED", "quantity": 5040,
+                "filledQuantity": 0, "price": 27.85,
+                "orderLegCollection": [{"instruction": "BUY",
+                                        "instrument": {"symbol": "PSQ"}}],
+            },
+        ])
+
+    fills = broker_with(handler, tmp_path).get_recent_fills()
+    assert len(fills) == 1
+    fill = fills[0]
+    assert fill.symbol == "PSQ" and fill.filled_quantity == 5040
+    assert fill.average_fill_price == pytest.approx(
+        (2000 * 27.84 + 3040 * 27.855) / 5040)
+    assert fill.updated_at == datetime(
+        2026, 11, 6, 14, 21, 3, tzinfo=timezone.utc).timestamp()

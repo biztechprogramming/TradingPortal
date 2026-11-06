@@ -1216,20 +1216,29 @@ function renderLogins(data) {
   const ibkr = data.ibkr || {};
   const restart = ibkr.restart || {};
   const restarting = restart.state === 'restarting';
+  const loggingOut = restart.state === 'logging_out';
   if (ibkr.enabled) {
+    // A stopped gateway is the normal logged-out state, not a fault.
+    const stopped = ibkr.gateway_running === false;
     const pill = ibkr.connected
       ? '<span class="pill pill-ok">LOGGED IN</span>'
-      : ibkr.gateway_running === false
-        ? '<span class="pill pill-bad">GATEWAY STOPPED</span>'
-        : '<span class="pill pill-bad">NOT LOGGED IN</span>';
+      : '<span class="pill pill-bad">NOT LOGGED IN</span>';
     const note = restart.state && restart.state !== 'idle'
       ? `<span class="muted">${esc(restart.message || '')}</span>`
+      : stopped ? '<span class="muted">Gateway stopped — IBKR is free for another browser.</span>'
       : (!ibkr.connected && ibkr.error ? `<span class="muted">${esc(ibkr.error)}</span>` : '');
+    // Log out whenever the gateway holds (or may hold) the session.
+    const showLogout = !restarting && (ibkr.connected || loggingOut || !stopped);
+    const button = restarting
+      ? '<button class="small" disabled>Waiting for phone approval…</button>'
+      : showLogout
+        ? `<button class="small" id="ibkr-logout" ${loggingOut ? 'disabled' : ''}>
+            ${loggingOut ? 'Logging out…' : 'Log out'}</button>`
+        : '<button class="small" id="ibkr-restart">Log in</button>';
     rows.push(`<div class="login-row">
       <span class="login-name">Interactive Brokers</span>
       <span class="login-detail">${pill} ${note}</span>
-      ${ibkr.connected && !restarting ? '' : `<button class="small" id="ibkr-restart" ${restarting ? 'disabled' : ''}>
-        ${restarting ? 'Waiting for phone approval…' : 'Log in'}</button>`}
+      ${button}
     </div>`);
   }
 
@@ -1240,6 +1249,8 @@ function renderLogins(data) {
   }
   const ib = document.getElementById('ibkr-restart');
   if (ib) ib.addEventListener('click', restartIbkr);
+  const ibOut = document.getElementById('ibkr-logout');
+  if (ibOut) ibOut.addEventListener('click', logoutIbkr);
 
   // The flow box is updated in place, never re-rendered, so a half-pasted
   // URL survives the poll.
@@ -1254,7 +1265,7 @@ function renderLogins(data) {
   $('login-paste').classList.toggle('hidden', flow.state !== 'waiting');
 
   const wasBusy = loginsBusy;
-  loginsBusy = flowActive || restarting;
+  loginsBusy = flowActive || restarting || loggingOut;
   // A login just finished: the broker set may have changed.
   if (wasBusy && !loginsBusy) refresh();
 }
@@ -1308,6 +1319,12 @@ async function submitPastedUrl() {
 async function restartIbkr() {
   if (!confirm('Log in to IBKR? An approval will be sent to your phone.')) return;
   await api('/api/logins/ibkr/restart', { method: 'POST' });
+  refreshLogins();
+}
+
+async function logoutIbkr() {
+  if (!confirm('Log out of IBKR? IBKR accounts disappear from the dashboard; charts keep using Schwab.')) return;
+  await api('/api/logins/ibkr/logout', { method: 'POST' });
   refreshLogins();
 }
 

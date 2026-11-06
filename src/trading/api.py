@@ -443,6 +443,16 @@ def create_app(
             return f"{done} But reconnecting failed — " + "; ".join(failed)
         return f"{done} Connected."
 
+    def _drop_ibkr_session() -> str | None:
+        # Rebuild so the dashboard stops showing the old IBKR accounts as
+        # connected; Schwab accounts are rebuilt too, harmlessly.
+        try:
+            service.rebuild_brokers()
+        except ExecutionLocked:
+            return ("Logged out of IBKR. A command is running; press Refresh "
+                    "once it finishes.")
+        return None
+
     schwab_login = SchwabLoginFlow(
         settings,
         on_success=lambda login: _reconnect_after_login(
@@ -452,6 +462,7 @@ def create_app(
         settings,
         on_authenticated=lambda: _reconnect_after_login(
             "ibkr", "IBKR gateway logged in."),
+        on_logged_out=_drop_ibkr_session,
     )
 
     @app.get("/api/logins", dependencies=[Auth])
@@ -462,7 +473,10 @@ def create_app(
         ]
         ibkr_enabled = "ibkr" in settings.brokers_enabled
         ibkr_connected = any(b.connected for b in ibkr_brokers)
-        if ibkr_enabled and not ibkr_connected:
+        gateway_running = ibeam_running() if ibkr_enabled else None
+        # Only chase a gateway that is actually up: a stopped one is the
+        # logged-out state, not a fault to recover from.
+        if ibkr_enabled and not ibkr_connected and gateway_running is not False:
             ibkr_restart.reconnect_if_ready()
         return {
             "schwab": {
@@ -483,7 +497,7 @@ def create_app(
                 "error": next(
                     (b.last_error for b in ibkr_brokers if b.last_error), None
                 ),
-                "gateway_running": ibeam_running() if ibkr_enabled else None,
+                "gateway_running": gateway_running,
                 "restart": ibkr_restart.status(),
             },
         }
@@ -505,6 +519,10 @@ def create_app(
     @app.post("/api/logins/ibkr/restart", dependencies=[Auth])
     def restart_ibkr_gateway() -> dict[str, Any]:
         return ibkr_restart.restart()
+
+    @app.post("/api/logins/ibkr/logout", dependencies=[Auth])
+    def logout_ibkr_gateway() -> dict[str, Any]:
+        return ibkr_restart.logout()
 
     return app
 

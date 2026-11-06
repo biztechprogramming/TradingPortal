@@ -230,7 +230,7 @@ def test_ibkr_restart_waits_for_login_then_reconnects(tmp_path, monkeypatch):
     assert restart.status()["message"] == "back" and reconnected == [True]
 
 
-def test_ibkr_restart_reports_a_missing_container(tmp_path, monkeypatch):
+def test_ibkr_login_reports_a_gateway_that_will_not_start(tmp_path, monkeypatch):
     monkeypatch.setattr(
         L, "_docker",
         lambda *a, **k: _completed(1, "Error: No such container: qqq-ibeam"),
@@ -240,7 +240,58 @@ def test_ibkr_restart_reports_a_missing_container(tmp_path, monkeypatch):
     )
     restart.restart()
     assert _wait_for(lambda: restart.status()["state"] == "failed")
-    assert "./start" in restart.status()["message"]
+    assert "Could not start the IBKR gateway" in restart.status()["message"]
+
+
+def test_ibkr_login_creates_a_missing_container(tmp_path, monkeypatch):
+    calls: list[tuple] = []
+
+    def docker(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "restart":
+            return _completed(1, "Error: No such container: qqq-ibeam")
+        return _completed()
+
+    monkeypatch.setattr(L, "_docker", docker)
+    restart = L.IbkrGatewayRestart(
+        make_settings(tmp_path), on_authenticated=lambda: "in", probe=lambda: True
+    )
+    restart.restart()
+    assert _wait_for(lambda: restart.status()["state"] == "done")
+    assert calls[1] == ("compose", "up", "-d", "ibeam")
+
+
+def test_ibkr_logout_ends_session_then_stops_gateway(tmp_path, monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(
+        L, "_docker", lambda *a, **k: order.append("docker " + a[0]) or _completed()
+    )
+    restart = L.IbkrGatewayRestart(
+        make_settings(tmp_path),
+        on_authenticated=lambda: None,
+        probe=lambda: True,
+        on_logged_out=lambda: order.append("rebuilt") or None,
+        end_session=lambda: order.append("logout"),
+    )
+    assert restart.logout()["state"] in ("logging_out", "logged_out")
+    assert _wait_for(lambda: restart.status()["state"] == "logged_out")
+    assert order == ["logout", "docker stop", "rebuilt"]
+
+
+def test_ibkr_logout_stops_gateway_even_if_session_call_fails(tmp_path, monkeypatch):
+    stopped: list[bool] = []
+    monkeypatch.setattr(L, "_docker", lambda *a, **k: stopped.append(True) or _completed())
+
+    def boom():
+        raise httpx.ConnectError("gateway unreachable")
+
+    restart = L.IbkrGatewayRestart(
+        make_settings(tmp_path), on_authenticated=lambda: None,
+        probe=lambda: True, end_session=boom,
+    )
+    restart.logout()
+    assert _wait_for(lambda: restart.status()["state"] == "logged_out")
+    assert stopped == [True]
 
 
 def test_gateway_that_logged_in_alone_is_picked_up_once(tmp_path):
@@ -281,6 +332,7 @@ def client(tmp_path, monkeypatch, exchanged):
     ("post", "/api/logins/schwab/start"),
     ("post", "/api/logins/schwab/paste"),
     ("post", "/api/logins/ibkr/restart"),
+    ("post", "/api/logins/ibkr/logout"),
 ])
 def test_login_routes_require_a_token(client, method, path):
     assert getattr(client, method)(path).status_code == 401

@@ -278,7 +278,7 @@ BROKERS_ENABLED=simulated ./qqq long
 ### Web dashboard
 
 ```bash
-./start      # IBKR gateway + dashboard in the background; ./stop to stop
+./start      # dashboard in the background (IBKR waits for Log in); ./stop to stop
 ./qqq serve  # or just the dashboard, in the foreground
 ```
 
@@ -287,7 +287,10 @@ Prints a URL containing the token. Three large buttons, plus:
 - **logins**: each Schwab login with the days left on its token and a Log in
   button (the consent page opens in a new tab and the redirect is caught on
   `SCHWAB_CALLBACK_URL`, so port 8182 must be forwarded too when working
-  remotely), and the IBKR gateway's state with a Restart & log in button
+  remotely), and IBKR with Log in / Log out buttons. The gateway is not
+  started with the server: while it runs it holds the only IBKR session and
+  locks out every browser. Charts and quotes come from Schwab first, so they
+  work with IBKR logged out
 - per account: connection, account id, QQQ shares, PSQ shares, cash, buying
   power, exposure, outstanding orders, last command, last execution price,
   errors, and a READ-ONLY badge where trading is not permitted

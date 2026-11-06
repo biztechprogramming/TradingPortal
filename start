@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring the whole system up: IBKR gateway, then the dashboard.
+# Bring the dashboard up. The IBKR gateway is left to the dashboard's Log in button.
 #
 # The app itself runs natively rather than in Docker, because the Schwab
 # refresh tokens live in ./var/state on the host. The container keeps its
@@ -20,17 +20,15 @@ warn() { printf '%s !  %s%s\n' "$YELLOW" "$1" "$OFF"; }
 fail() { printf '%s XX %s%s\n' "$RED" "$1" "$OFF"; }
 
 # --- 1. IBKR gateway ---------------------------------------------------------
-# Started but not waited on: the gateway logs itself in (approve on your
-# phone), and the dashboard's Logins panel shows when it has.
-step "IBKR gateway (Docker)"
+# Deliberately NOT started here. A running gateway logs in by itself and holds
+# the one IBKR session, which locks you out of IBKR in any browser. Log in and
+# out from the dashboard's Logins panel instead.
+step "IBKR gateway"
 
-if ! docker info >/dev/null 2>&1; then
-    fail "Docker is not available. IBKR will be unreachable; Schwab still works."
-elif [ -n "$(docker ps -q -f name=qqq-ibeam)" ]; then
-    echo "    already running"
+if [ -n "$(docker ps -q -f name=qqq-ibeam 2>/dev/null)" ]; then
+    echo "    running (logged in) — use Log out on the dashboard to free the session"
 else
-    docker compose up -d ibeam >/dev/null
-    echo "    started — approve the IBKR login on your phone"
+    echo "    not started — click Log in on the dashboard when you want IBKR"
 fi
 
 # --- 2. dashboard ------------------------------------------------------------

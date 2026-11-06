@@ -7,8 +7,10 @@ code is exchanged here. A pasted redirected URL is accepted as the fallback,
 exactly as the CLI accepts one on stdin.
 
 IBKR: the bundled ibeam container logs in by itself with the credentials in
-``.env``; the only thing worth a button is restarting it, which makes it log in
-again (and send the phone approval) when the session has died.
+``.env`` as soon as it runs, so running it *is* being logged in. It is not
+started with the server: IBKR allows one brokerage session per user, and a
+gateway holding it locks every browser out. Log in starts the container (and
+sends the phone approval); Log out ends the session and stops it.
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ log = logging.getLogger("trading.logins")
 
 #: Container name fixed in docker-compose.yml.
 IBEAM_CONTAINER = "qqq-ibeam"
+
+#: Where docker-compose.yml lives, for creating the container on first login.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 #: How long a dashboard-started Schwab login waits for the redirect.
 SCHWAB_REDIRECT_TIMEOUT = 300.0
@@ -274,7 +279,8 @@ def _docker(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
     if shutil.which("docker") is None:
         raise LoginError("Docker is not installed or not on PATH.")
     return subprocess.run(
-        ["docker", *args], capture_output=True, text=True, timeout=timeout
+        ["docker", *args], capture_output=True, text=True, timeout=timeout,
+        cwd=PROJECT_ROOT,
     )
 
 
@@ -290,17 +296,21 @@ def ibeam_running() -> bool | None:
 
 
 class IbkrGatewayRestart:
-    """Restart ibeam, wait for it to log in, then hand back to the caller."""
+    """Start/restart ibeam and wait for it to log in; or log out and stop it."""
 
     def __init__(
         self,
         settings: Settings,
         on_authenticated: Callable[[], str | None],
         probe: Callable[[], bool] | None = None,
+        on_logged_out: Callable[[], str | None] | None = None,
+        end_session: Callable[[], None] | None = None,
     ) -> None:
         self.settings = settings
         self._on_authenticated = on_authenticated
+        self._on_logged_out = on_logged_out or (lambda: None)
         self._probe = probe or self._gateway_authenticated
+        self._end_session = end_session or self._gateway_logout
         self._lock = threading.Lock()
         self._state: dict[str, Any] = {"state": "idle"}
         self._checking = False
@@ -348,16 +358,47 @@ class IbkrGatewayRestart:
         threading.Thread(target=self._run, name="ibkr-restart", daemon=True).start()
         return self.status()
 
+    def logout(self) -> dict[str, Any]:
+        """End the IBKR session and stop the gateway, freeing it for a browser."""
+        with self._lock:
+            if self._state.get("state") in ("restarting", "logging_out"):
+                return dict(self._state)
+            self._state = {
+                "state": "logging_out",
+                "message": "Logging out of IBKR…",
+                "started_at": time.time(),
+            }
+        threading.Thread(target=self._run_logout, name="ibkr-logout", daemon=True).start()
+        return self.status()
+
+    def _run_logout(self) -> None:
+        try:
+            try:
+                self._end_session()   # frees the session now, not on timeout
+            except Exception as exc:
+                log.info("IBKR gateway logout call failed (stopping anyway): %s", exc)
+            res = _docker("stop", IBEAM_CONTAINER, timeout=60)
+            if res.returncode != 0 and "No such container" not in res.stderr:
+                raise LoginError(f"docker stop failed: {res.stderr.strip()[:300]}")
+            note = self._on_logged_out()
+            self._set(state="logged_out",
+                      message=note or "Logged out of IBKR; the gateway is stopped.")
+        except LoginError as exc:
+            self._set(state="failed", message=str(exc))
+        except Exception as exc:
+            log.exception("IBKR logout crashed")
+            self._set(state="failed", message=str(exc))
+
     def _run(self) -> None:
         try:
             res = _docker("restart", IBEAM_CONTAINER, timeout=90)
+            if res.returncode != 0 and "No such container" in res.stderr:
+                # Never created (fresh clone, or removed): compose makes it.
+                res = _docker("compose", "up", "-d", "ibeam", timeout=180)
             if res.returncode != 0:
-                if "No such container" in res.stderr:
-                    raise LoginError(
-                        f"The {IBEAM_CONTAINER} container does not exist. "
-                        "Run ./start (or docker compose up -d ibeam)."
-                    )
-                raise LoginError(f"docker restart failed: {res.stderr.strip()[:300]}")
+                raise LoginError(
+                    f"Could not start the IBKR gateway: {res.stderr.strip()[:300]}"
+                )
 
             deadline = time.time() + IBKR_AUTH_TIMEOUT
             while time.time() < deadline:
@@ -388,6 +429,15 @@ class IbkrGatewayRestart:
             return False
         finally:
             probe.close()
+
+    def _gateway_logout(self) -> None:
+        from .brokers.ibkr import IBKRBroker
+
+        gateway = IBKRBroker(self.settings)
+        try:
+            gateway._request("POST", "/logout", retries=0)
+        finally:
+            gateway.close()
 
     def _set(self, **state: Any) -> None:
         with self._lock:

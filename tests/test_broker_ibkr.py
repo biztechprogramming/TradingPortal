@@ -378,3 +378,23 @@ def test_connect_refuses_a_competing_session(tmp_path):
     with pytest.raises(BrokerAuthError, match="competing"):
         broker.connect()
     assert broker.connected is False
+
+
+def test_live_order_sizes_in_display_format_are_parsed():
+    """IBKR can omit totalSize and send sizeAndFills as "filled/total" with commas."""
+    from trading.brokers.ibkr import _parse_live_order
+
+    order = _parse_live_order({
+        "orderId": 7, "ticker": "PSQ", "side": "BUY", "status": "Submitted",
+        "sizeAndFills": "0/2,470", "price": "27.85",
+    }, "ibkr:U1")
+    assert order.quantity == 2470 and order.filled_quantity == 0
+    assert order.limit_price == 27.85
+    assert order.state.is_open
+
+    partial = _parse_live_order({
+        "orderId": 8, "ticker": "PSQ", "side": "BUY", "status": "Submitted",
+        "totalSize": "1,000", "filledQuantity": "250", "avgPrice": "27.80",
+    }, "ibkr:U1")
+    assert partial.quantity == 1000 and partial.filled_quantity == 250
+    assert partial.remaining_quantity == 750

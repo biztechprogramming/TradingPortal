@@ -869,19 +869,42 @@ def _parse_snapshot(symbol: str, raw: dict[str, Any]) -> Quote:
     )
 
 
+def _num(value: Any) -> float:
+    """IBKR sends numbers as numbers or as display strings like ``"2,470"``."""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").replace("$", "").strip())
+    except ValueError:
+        return 0.0
+
+
+def _size_and_fills(value: Any) -> tuple[float, float]:
+    """``"0/2,470"`` -> (filled 0, total 2470). A bare number is a total."""
+    text = str(value or "")
+    if "/" in text:
+        filled, _, total = text.partition("/")
+        return _num(filled), _num(total)
+    return 0.0, _num(text)
+
+
 def _parse_live_order(raw: dict[str, Any], broker: str) -> Order:
     side_raw = str(raw.get("side", "BUY")).upper()
-    total = float(raw.get("totalSize", 0) or raw.get("sizeAndFills", 0) or 0)
-    filled = float(raw.get("filledQuantity", 0) or 0)
+    sf_filled, sf_total = _size_and_fills(raw.get("sizeAndFills"))
+    filled = _num(raw.get("filledQuantity")) or sf_filled
+    total = (_num(raw.get("totalSize")) or sf_total
+             or filled + _num(raw.get("remainingQuantity")))
     return Order(
         order_id=str(raw.get("orderId", "")),
         symbol=str(raw.get("ticker", "")).upper(),
         side=Side.SELL if side_raw.startswith("S") else Side.BUY,
         quantity=total,
-        limit_price=float(raw.get("price", 0) or 0),
+        limit_price=_num(raw.get("price")),
         state=normalize_state(str(raw.get("status", "")), STATUS_MAP),
         filled_quantity=filled,
-        average_fill_price=float(raw.get("avgPrice", 0) or 0),
+        average_fill_price=_num(raw.get("avgPrice")),
         status_message=str(raw.get("order_ccp_status", "") or ""),
         broker=broker,
     )
@@ -890,9 +913,9 @@ def _parse_live_order(raw: dict[str, Any], broker: str) -> Order:
 def _parse_order_status(
     order_id: str, raw: dict[str, Any], broker: str, meta: dict[str, Any]
 ) -> Order:
-    total = float(raw.get("size", 0) or meta.get("quantity", 0) or 0)
-    filled = float(raw.get("cum_fill", 0) or 0)
-    avg = float(raw.get("average_price", 0) or 0)
+    total = _num(raw.get("size")) or _num(meta.get("quantity"))
+    filled = _num(raw.get("cum_fill"))
+    avg = _num(raw.get("average_price"))
     side_raw = str(raw.get("side", "") or "").upper()
     if side_raw:
         side = Side.SELL if side_raw.startswith("S") else Side.BUY
@@ -904,7 +927,7 @@ def _parse_order_status(
         symbol=str(raw.get("symbol") or meta.get("symbol", "")).upper(),
         side=side if isinstance(side, Side) else Side.BUY,
         quantity=total,
-        limit_price=float(raw.get("limit_price", 0) or meta.get("limit_price", 0) or 0),
+        limit_price=_num(raw.get("limit_price")) or _num(meta.get("limit_price")),
         state=normalize_state(str(raw.get("order_status", "")), STATUS_MAP),
         filled_quantity=filled,
         average_fill_price=avg,

@@ -1332,10 +1332,21 @@ async function submitPastedUrl() {
 }
 
 async function restartIbkr() {
-  if (!await askConfirm('Log in to IBKR?',
-    '<p>An approval will be sent to your phone.</p>')) return;
-  await api('/api/logins/ibkr/restart', { method: 'POST' });
+  const res = await api('/api/logins/ibkr/restart', { method: 'POST' });
+  toast(res.status === 200
+    ? 'IBKR login started — approve it on your phone.'
+    : (res.body.detail || 'IBKR login could not be started.'));
   refreshLogins();
+}
+
+function toast(message) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.setAttribute('role', 'status');
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add('toast-out'), 4500);
+  setTimeout(() => el.remove(), 5000);
 }
 
 async function logoutIbkr() {

@@ -459,3 +459,13 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .login-paste p { flex-basis: 100%; margin: 0; }
 .login-paste input { flex: 1; min-width: 260px; width: auto; }
 .hidden { display: none !important; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  max-width: calc(100vw - 32px); z-index: 1000;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 16px; box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  transition: opacity .5s;
+}
+.toast-out { opacity: 0; }

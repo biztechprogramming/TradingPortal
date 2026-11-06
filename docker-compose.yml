@@ -115,6 +115,12 @@ services:
       IBEAM_PASSWORD: ${IBEAM_PASSWORD:-}
       IBEAM_GATEWAY_STARTUP: 30
       IBEAM_HEALTH_CHECK_INTERVAL: 60
+      # Seconds ibeam keeps its login browser open after submitting the
+      # password, which is the
+      # window for approving the IBKR Key notification. The default 15 is
+      # too short to reach the phone, and each retry sends a new notification
+      # that makes the earlier one useless.
+      IBEAM_OAUTH_TIMEOUT: 120
     ports:
       # Loopback only; the app reaches it over the compose network by name.
       - "127.0.0.1:5000:5000"

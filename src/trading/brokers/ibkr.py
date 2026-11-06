@@ -626,6 +626,22 @@ class IBKRBroker(Broker):
                 out.append(order)
         return out
 
+    def get_recent_fills(self, days: int = 30) -> list[Order] | None:
+        """Filled orders from IBKR's executions, at most 7 days back.
+
+        One execution per partial fill, so they are grouped by order into
+        total shares and a size-weighted average price. The gateway often
+        answers the first call after login with an empty list; an empty
+        answer is retried once.
+        """
+        self.tickle()
+        params = {"days": max(1, min(int(days), 7))}
+        rows = self._request("GET", "/iserver/account/trades", params=params) or []
+        if not rows:
+            time.sleep(1.0)
+            rows = self._request("GET", "/iserver/account/trades", params=params) or []
+        return _group_executions(rows, self._acct_id, self.name)
+
     def get_order_status(self, order_id: str) -> Order:
         self.tickle()
         raw = self._request(
@@ -888,6 +904,41 @@ def _size_and_fills(value: Any) -> tuple[float, float]:
         filled, _, total = text.partition("/")
         return _num(filled), _num(total)
     return 0.0, _num(text)
+
+
+def _group_executions(
+    rows: Any, account_id: str | None, broker: str
+) -> list[Order]:
+    """Fold IBKR executions into one filled Order per order id."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows if isinstance(rows, list) else []:
+        account = str(row.get("accountCode") or row.get("account") or "")
+        if account_id and account and account.upper() != account_id.upper():
+            continue
+        size = _num(row.get("size"))
+        if size <= 0 or not row.get("symbol"):
+            continue
+        key = str(row.get("order_id") or row.get("order_ref")
+                  or row.get("execution_id"))
+        g = grouped.setdefault(key, {
+            "symbol": str(row["symbol"]).upper(),
+            "side": Side.SELL if str(row.get("side", "")).upper().startswith("S")
+            else Side.BUY,
+            "shares": 0.0, "notional": 0.0, "at": 0.0,
+        })
+        g["shares"] += size
+        g["notional"] += size * _num(row.get("price"))
+        g["at"] = max(g["at"], _num(row.get("trade_time_r")) / 1000.0)
+    return [
+        Order(
+            order_id=key, symbol=g["symbol"], side=g["side"],
+            quantity=g["shares"], limit_price=0.0, state=OrderState.FILLED,
+            filled_quantity=g["shares"],
+            average_fill_price=g["notional"] / g["shares"],
+            broker=broker, updated_at=g["at"],
+        )
+        for key, g in grouped.items()
+    ]
 
 
 def _parse_live_order(raw: dict[str, Any], broker: str) -> Order:

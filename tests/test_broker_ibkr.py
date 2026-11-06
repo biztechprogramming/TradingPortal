@@ -398,3 +398,26 @@ def test_live_order_sizes_in_display_format_are_parsed():
     }, "ibkr:U1")
     assert partial.quantity == 1000 and partial.filled_quantity == 250
     assert partial.remaining_quantity == 750
+
+
+def test_executions_group_into_one_fill_per_order():
+    """IBKR reports each partial fill separately; the dashboard wants the order."""
+    from trading.brokers.ibkr import _group_executions
+
+    rows = [
+        {"symbol": "PSQ", "side": "S", "size": 70.0, "price": "27.85",
+         "trade_time_r": 1793973014000, "order_id": 1078818583, "accountCode": "U1"},
+        {"symbol": "PSQ", "side": "S", "size": 930.0, "price": "27.86",
+         "trade_time_r": 1793973015000, "order_id": 1078818583, "accountCode": "U1"},
+        {"symbol": "PSQ", "side": "B", "size": "2,400", "price": "26.8373",
+         "trade_time_r": 1793739260000, "order_id": 663127805, "accountCode": "U1"},
+        {"symbol": "PSQ", "side": "B", "size": 5.0, "price": "1",
+         "trade_time_r": 1793739260000, "order_id": 9, "accountCode": "U2"},  # other account
+    ]
+    fills = {f.order_id: f for f in _group_executions(rows, "U1", "ibkr:U1")}
+    assert set(fills) == {"1078818583", "663127805"}
+    sale = fills["1078818583"]
+    assert sale.side.value == "SELL" and sale.filled_quantity == 1000
+    assert sale.average_fill_price == pytest.approx((70 * 27.85 + 930 * 27.86) / 1000)
+    assert sale.updated_at == 1793973015.0
+    assert fills["663127805"].filled_quantity == 2400

@@ -83,6 +83,10 @@ class _LegState:
         return max(0, int(round(self.requested - self.filled)))
 
 
+#: ``(broker_name, symbol) -> (source_broker_name, quote)`` or ``None``.
+QuoteFallback = Callable[[str, str], "tuple[str, Quote] | None"]
+
+
 class ExecutionEngine:
     """Executes one leg at a time against one broker."""
 
@@ -94,12 +98,16 @@ class ExecutionEngine:
         *,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        quote_fallback: QuoteFallback | None = None,
     ) -> None:
         self.settings = settings
         self.audit = audit_log
         self.command_id = command_id
         self._sleep = sleep
         self._clock = clock
+        #: Asked for a price from another account when this broker has none,
+        #: e.g. an IBKR account without a market-data subscription.
+        self._quote_fallback = quote_fallback
 
     # --- helpers ----------------------------------------------------------
 
@@ -109,7 +117,40 @@ class ExecutionEngine:
         )
 
     def fresh_quote(self, broker: Broker, symbol: str) -> Quote:
-        """Fetch and validate a quote, auditing both outcomes."""
+        """Fetch and validate a quote, auditing both outcomes.
+
+        When this broker cannot price the symbol, a validated quote from
+        another connected account is used instead, so a missing market-data
+        subscription does not leave a position stranded.
+        """
+        try:
+            return self._own_quote(broker, symbol)
+        except QuoteError as exc:
+            if self._quote_fallback is None:
+                raise
+            borrowed = self._quote_fallback(broker.name, symbol)
+            if borrowed is None:
+                raise
+            source, quote = borrowed
+            try:
+                validate_quote(quote, self.settings)
+            except QuoteError:
+                raise exc from None
+            self._log(
+                A.QUOTE,
+                broker.name,
+                symbol=symbol,
+                quote=quote.to_dict(),
+                borrowed_from=source,
+                reason=f"own quote unusable: {exc}",
+            )
+            log.warning(
+                "%s: no usable %s quote (%s); pricing from %s",
+                broker.name, symbol, exc, source,
+            )
+            return quote
+
+    def _own_quote(self, broker: Broker, symbol: str) -> Quote:
         quote = broker.get_quote(symbol)
         try:
             validate_quote(quote, self.settings)

@@ -168,16 +168,82 @@ def test_quote_failure_during_reprice_does_not_abandon_the_order(
     assert result.exposure_after is Exposure.LONG
 
 
-def test_sell_never_exceeds_the_settled_position(settings, tmp_path):
-    """Unsettled shares must not be sold, even if the total looks larger."""
+def test_go_flat_sells_unsettled_shares_too(settings, tmp_path):
+    """Shares bought today are sellable; going flat sells all of them."""
+    from trading.models import Position
+
+    broker = make_broker(settings, cash=0, positions={"QQQ": 100})
+    real_positions = broker.get_positions
+
+    def with_unsettled():
+        return [
+            Position(p.symbol, p.quantity, p.average_price, p.market_value,
+                     settled_quantity=min(p.quantity, 60))
+            for p in real_positions()
+        ]
+
+    broker.get_positions = with_unsettled  # type: ignore[assignment]
+    result = run(settings, tmp_path, broker, Command.GO_FLAT)
+
+    sells = [o for o in broker.submitted_orders if o.side is Side.SELL]
+    assert sells and sells[0].quantity == 100
+    assert any("settle" in w for w in result.warnings)
+    assert result.ok, result.errors
+
+
+def test_go_flat_that_leaves_shares_is_a_failure(settings, tmp_path):
+    """Selling less than is held must not be reported as success."""
     from trading.models import Position
 
     broker = make_broker(settings, cash=0, positions={"QQQ": 100})
     broker.get_positions = lambda: [  # type: ignore[assignment]
-        Position("QQQ", 100, 480.0, 50_000.0, settled_quantity=60)
+        Position("QQQ", 100, 480.0, 50_000.0)
     ]
     result = run(settings, tmp_path, broker, Command.GO_FLAT)
 
-    sells = [o for o in broker.submitted_orders if o.side is Side.SELL]
-    assert sells and sells[0].quantity == 60
-    assert any("settled" in w for w in result.warnings)
+    assert not result.ok
+    assert any("not flat" in e for e in result.errors)
+
+
+def test_go_flat_prices_from_another_account_when_quote_missing(
+    settings, tmp_path
+):
+    """An account with no market data still sells, priced from a peer."""
+    from trading.errors import InvalidQuoteError
+
+    broker = make_broker(settings, name="ibkr", cash=0, positions={"QQQ": 10})
+    peer = make_broker(settings, name="schwab")
+    own_quote = broker.get_quote
+
+    def no_market_data(symbol):
+        own_quote(symbol)  # keep the simulator's book current
+        raise InvalidQuoteError("no bid/ask")
+
+    broker.get_quote = no_market_data  # type: ignore[assignment]
+    strategy = Strategy(
+        settings, AuditLog(tmp_path / "log"), "cmd-fail", sleep=lambda _: None,
+        quote_fallback=lambda name, sym: ("schwab", peer.get_quote(sym)),
+    )
+    result = strategy.run(broker, Command.GO_FLAT)
+
+    assert result.ok, result.errors
+    assert result.exposure_after is Exposure.FLAT
+
+
+def test_missing_quote_without_a_peer_still_fails(settings, tmp_path):
+    from trading.errors import InvalidQuoteError
+
+    broker = make_broker(settings, name="ibkr", cash=0, positions={"QQQ": 10})
+
+    def no_market_data(symbol):
+        raise InvalidQuoteError("no bid/ask")
+
+    broker.get_quote = no_market_data  # type: ignore[assignment]
+    strategy = Strategy(
+        settings, AuditLog(tmp_path / "log"), "cmd-fail", sleep=lambda _: None,
+        quote_fallback=lambda name, sym: None,
+    )
+    result = strategy.run(broker, Command.GO_FLAT)
+
+    assert not result.ok
+    assert any("no bid/ask" in e for e in result.errors)

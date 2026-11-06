@@ -908,6 +908,21 @@ class TradingService:
         """
         return {n: b for n, b in self.brokers.items() if not b.read_only}
 
+    def _borrow_quote(self, for_broker: str, symbol: str):
+        """A quote from another connected account, for one that has none.
+
+        Returns ``(source_name, quote)`` or ``None``. The caller validates it
+        exactly as it would its own.
+        """
+        for name, broker in list(self.brokers.items()):
+            if name == for_broker or not broker.connected:
+                continue
+            try:
+                return name, broker.get_quote(symbol)
+            except Exception as exc:
+                log.info("%s: cannot lend a %s quote: %s", name, symbol, exc)
+        return None
+
     def _run_all(self, command: Command, command_id: str) -> CommandResult:
         result = CommandResult(
             command_id=command_id, command=command, mode=self.settings.mode
@@ -924,7 +939,10 @@ class TradingService:
         )
 
         def run_one(name: str, broker: Broker) -> BrokerResult:
-            strategy = Strategy(self.settings, self.audit, command_id)
+            strategy = Strategy(
+                self.settings, self.audit, command_id,
+                quote_fallback=self._borrow_quote,
+            )
             return strategy.run(broker, command)
 
         if targets:

@@ -16,7 +16,7 @@ from .audit import AuditLog
 from .brokers.base import Broker
 from .config import Settings
 from .errors import TradingError
-from .execution import ExecutionEngine, LegRequest, leg_from_exception
+from .execution import ExecutionEngine, LegRequest, QuoteFallback, leg_from_exception
 from .models import (
     Balances,
     BrokerResult,
@@ -43,13 +43,15 @@ class Strategy:
         *,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        quote_fallback: QuoteFallback | None = None,
     ) -> None:
         self.settings = settings
         self.audit = audit_log
         self.command_id = command_id
         self._sleep = sleep
         self.engine = ExecutionEngine(
-            settings, audit_log, command_id, sleep=sleep, clock=clock
+            settings, audit_log, command_id, sleep=sleep, clock=clock,
+            quote_fallback=quote_fallback,
         )
 
     # --- entry point ------------------------------------------------------
@@ -89,6 +91,8 @@ class Strategy:
             result.cash_after = (
                 final.balances.cash_available if final.balances else 0.0
             )
+            if command is Command.GO_FLAT:
+                self._check_flat(final, result)
             result.ok = not result.errors
 
         except TradingError as exc:
@@ -192,6 +196,19 @@ class Strategy:
         if not sold_any:
             result.warnings.append("already flat; nothing to sell")
 
+    def _check_flat(self, final: BrokerSnapshot, result: BrokerResult) -> None:
+        """GO FLAT succeeded only if nothing is left; say so when it is not."""
+        symbols = {self.settings.long_symbol.upper(), self.settings.short_symbol.upper()}
+        left = [
+            f"{p.quantity:g} {p.symbol}"
+            for p in final.positions
+            if p.symbol.upper() in symbols and p.quantity > 0
+        ]
+        if left:
+            result.errors.append(
+                "not flat after GO FLAT: still holding " + ", ".join(left)
+            )
+
     def _liquidate(
         self, broker: Broker, symbol: str, result: BrokerResult
     ) -> Fill | None:
@@ -208,18 +225,17 @@ class Strategy:
             )
             return None
 
-        # Some brokers report unsettled shares separately; never try to sell
-        # more than is confirmed sellable.
+        # Shares bought today are unsettled but still sellable. Going flat
+        # sells all of them; in a cash account that is only a problem when
+        # the purchase was paid for with unsettled money.
         if position.settled_quantity is not None:
-            sellable = int(min(quantity, position.settled_quantity))
-            if sellable < quantity:
+            unsettled = quantity - int(min(quantity, position.settled_quantity))
+            if unsettled > 0:
                 result.warnings.append(
-                    f"{symbol}: only {sellable} of {quantity} shares are "
-                    "settled/sellable; selling what is available"
+                    f"{symbol}: selling {unsettled} of {quantity} shares before "
+                    "they settle; in a cash account this is a good-faith "
+                    "violation if they were bought with unsettled cash"
                 )
-                quantity = sellable
-        if quantity <= 0:
-            return None
 
         fill = self.engine.execute_leg(
             broker,

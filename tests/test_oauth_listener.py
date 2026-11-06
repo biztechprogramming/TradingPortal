@@ -98,6 +98,22 @@ def test_catcher_captures_the_code_over_https(tmp_path):
     assert result[0].error is None
 
 
+def test_a_silent_connection_does_not_block_the_redirect(tmp_path):
+    """VS Code's port forwarder opens connections and sends nothing.
+
+    With the TLS handshake done at accept(), one of those stalled the only
+    serving thread and the browser's real redirect hung until the code expired.
+    """
+    port = _free_port()
+    catcher, why = start_catcher(f"https://127.0.0.1:{port}/", tmp_path)
+    assert catcher is not None, why
+
+    with catcher, socket.create_connection(("127.0.0.1", port)):
+        response = _fetch(f"https://127.0.0.1:{port}/?code=abc")
+        assert response.status_code == 200
+        assert catcher.wait(5).code == "abc"
+
+
 def test_favicon_does_not_end_the_wait(tmp_path):
     port = _free_port()
     catcher, why = start_catcher(f"https://127.0.0.1:{port}/", tmp_path)

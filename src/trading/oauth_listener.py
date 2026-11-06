@@ -198,6 +198,9 @@ class Redirect:
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     server_version = "qqq-oauth"
+    #: Drop a connection that sends nothing. VS Code's port forwarder opens
+    #: idle ones; without this each pins a worker thread forever.
+    timeout = 15
 
     def do_GET(self) -> None:  # noqa: N802  (stdlib naming)
         query = urllib.parse.urlparse(self.path).query
@@ -310,7 +313,13 @@ def start_catcher(
             cert, key = ensure_certificate(state_dir, host)
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(cert, key)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
+            # Handshake lazily, in the per-connection worker thread. Done at
+            # accept() it runs on the one serving thread, so a single client
+            # that connects and stays silent (VS Code's port forwarder does
+            # this) blocks every later connection, the real redirect included.
+            server.socket = context.wrap_socket(
+                server.socket, server_side=True, do_handshake_on_connect=False
+            )
         except Exception as exc:
             server.server_close()
             return None, f"no TLS certificate available — {exc}"

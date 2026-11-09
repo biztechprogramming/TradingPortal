@@ -202,9 +202,11 @@ on QQQ, against the $3.00 the bps-only defaults used to allow.
 
 Sizing lives in `src/trading/sizing.py`. Two rules shape every buy:
 
-- **`SHARE_LOT_SIZE`** (default 10) — the order quantity is always a whole
-  multiple. Every path that decides a size honours it: the initial sizing, a
-  ladder rung, and a reprice that has to shrink.
+- **`SHARE_LOT_SIZE`** (default 10) — the order quantity is a whole multiple
+  when whole lots still reach the band; otherwise the order is sized in single
+  shares. A reprice that has to shrink keeps whichever the order started with.
+- **One share in reserve** — cash left after a buy is always at least one
+  share's price (at the limit) plus `CASH_BUFFER_DOLLARS`.
 - **`TARGET_CASH_MIN_PCT` / `TARGET_CASH_MAX_PCT`** (default 95 / 98) — the
   band of available cash a buy aims to deploy. The max is a hard ceiling. The
   min is a *reporting* threshold, not a floor.
@@ -219,20 +221,15 @@ lot_size * price  <=  (MAX_PCT - MIN_PCT)% * cash
 
 At 10 shares and a 3-point band that is roughly **$200,000 of cash for QQQ**
 (one lot ≈ $6,000) and **$10,000 for PSQ** (one lot ≈ $320). Below that
-threshold the largest whole lot at or under the ceiling is taken and
-`caps_applied` records `below TARGET_CASH_MIN_PCT` with the arithmetic. The lot
-rule wins the conflict, because a ragged share count is the thing the band
-exists to avoid.
-
-The sharpest edge of this: with a 10-share lot, an account holding less than
-about **$5,200** cannot place a QQQ order at all — nine shares is not a lot.
-The resulting error names `SHARE_LOT_SIZE` so it is not mistaken for a genuine
-funding problem. Set `SHARE_LOT_SIZE=1` to size at the share level instead.
+threshold rounding to a lot would leave the account under-invested, so the
+order is sized in single shares instead and `caps_applied` records
+`SHARE_LOT_SIZE=10 skipped`. Set `SHARE_LOT_SIZE=1` to always size at the
+share level.
 
 | Cash | QQQ @ ~$500 | Deployed |
 |---|---|---|
-| $5,000 | 0 shares — order refused | — |
-| $10,000 | 10 | 50% |
-| $50,000 | 90 | 90% |
-| $250,000 | 480 | 96% ✅ in band |
-| $1,000,000 | 1,950 | 97.5% ✅ in band |
+| $5,000 | 8 | 80% |
+| $10,000 | 18 | 90% |
+| $50,000 | 98 | 98% |
+| $250,000 | 490 | 98% ✅ whole lots |
+| $1,000,000 | 1,960 | 98% ✅ whole lots |

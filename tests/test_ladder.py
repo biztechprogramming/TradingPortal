@@ -188,7 +188,7 @@ def test_place_new_order_sizes_against_the_whole_account(executor):
 
     assert result.ok, result.errors
     assert result.action == ACTION_PLACED
-    assert result.quantity == 10            # 98% of 10000 / 498 -> one lot
+    assert result.quantity == 19            # (10000 - 25 - 498) / 498, single shares
     assert result.marketable is False
     assert len(result.open_orders) == 1
     # An order is not a position.
@@ -234,13 +234,14 @@ def test_reprice_upward_shrinks_rather_than_overspending(executor):
     broker.set_quote("QQQ", 500.00, 500.04, day_high=502.0, day_low=460.0)
 
     first = ex.place(broker, "QQQ", 460.00)
-    assert first.quantity == 20             # 98% of 9500 / 460 -> 2 lots
+    assert first.quantity == 19             # (9500 - 25 - 460) / 460, single shares
 
     second = ex.place(broker, "QQQ", 500.00)
 
     assert second.ok, second.errors
     assert second.action == ACTION_RESIZED
-    assert second.quantity == 10            # two lots no longer fit at 500
+    assert second.quantity < first.quantity  # 19 no longer fits at 500
+    assert second.quantity % 10 != 0         # stays in single shares, not lots
     assert second.quantity * second.limit_price <= 9_500.0
     assert any("reduced" in w for w in second.warnings)
 

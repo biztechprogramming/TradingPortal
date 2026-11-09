@@ -513,7 +513,7 @@ class ExecutionEngine:
         # what is actually left. Aligning after the min() would instead round
         # away the tail of a partially-filled leg, which is the broker's share
         # count to finish, not ours to reshape.
-        affordable = lot_floor(left // limit_price, self.settings)
+        affordable = lot_floor(left // limit_price, self.settings, req.quantity)
         return min(state.remaining, affordable)
 
     def _ensure_closed(

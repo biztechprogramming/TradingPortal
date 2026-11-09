@@ -28,8 +28,9 @@ def test_flat_to_long(settings, tmp_path):
     assert result.ok, result.errors
     assert result.exposure_before is Exposure.FLAT
     assert result.exposure_after is Exposure.LONG
-    # 98% of 10000 / 500.08 limit = 19 shares, rounded down to one lot of 10.
-    assert broker.get_position("QQQ").quantity == 10
+    # One lot of 10 is only 50% of cash, so it sizes in single shares,
+    # keeping $25 buffer + one share back: (10000 - 25 - 500.08) / 500.08 = 18.
+    assert broker.get_position("QQQ").quantity == 18
     assert broker.get_position("PSQ") is None
     assert result.entry_fill.side is Side.BUY
     assert result.cash_after < result.cash_before
@@ -158,7 +159,7 @@ def test_already_long_tops_up_with_idle_cash(settings, tmp_path):
     result = run(settings, tmp_path, broker, Command.GO_LONG)
 
     assert result.ok, result.errors
-    assert broker.get_position("QQQ").quantity == 30   # 20 + one more lot
+    assert broker.get_position("QQQ").quantity == 34   # 20 + 14 single shares
     assert not any(o.side is Side.SELL for o in broker.submitted_orders)
 
 

@@ -290,8 +290,10 @@ def test_each_account_is_sized_from_its_own_cash(tmp_path):
 
     small = svc.brokers["schwab:1111"].get_position("QQQ").quantity
     large = svc.brokers["schwab:2222"].get_position("QQQ").quantity
-    assert small == 10        # 98% of 10000 / 500.08 -> 19 -> one lot
-    assert large == 30        # 98% of 20000 / 500.08 -> 39 -> three lots
+    # Neither account can reach 95% in lots of 10, so both size in single
+    # shares, keeping $25 buffer + one share of cash back.
+    assert small == 18        # (10000 - 25 - 500.08) / 500.08 -> 18
+    assert large == 38        # (20000 - 25 - 500.08) / 500.08 -> 38
     assert large > small
 
 

@@ -398,7 +398,7 @@ one. The ones that matter most:
 | `REQUIRE_CONFIRMATION` | `true` | Confirm live LONG/SHORT |
 | `CASH_BUFFER_DOLLARS` | `25` | Held back from every buy |
 | `ALLOW_MARGIN` | `false` | Ignore margin buying power |
-| `SHARE_LOT_SIZE` | `10` | Order quantities are whole lots of this many shares |
+| `SHARE_LOT_SIZE` | `10` | Order quantities are whole lots of this many shares when lots still reach 95% of cash; single shares otherwise |
 | `TARGET_CASH_MIN_PCT` / `TARGET_CASH_MAX_PCT` | `95` / `98` | Share of available cash a buy deploys |
 | `BUY_OFFSET_TICKS` / `SELL_OFFSET_TICKS` | `1` | Working offset through the touch, in ticks |
 | `SPREAD_MULTIPLE` | `1.0` | Widen the offset with the spread on a thin book |
@@ -417,12 +417,11 @@ PSQ and 60 on QQQ, so one bps setting cannot serve both. The bps variables
 backstops, and whichever limit is tighter binds. See
 [docs/LIMIT_ALGORITHM.md](docs/LIMIT_ALGORITHM.md).
 
-Buys are sized in whole lots of `SHARE_LOT_SIZE` shares targeting 95–98% of
-available cash. On a high-priced symbol those two rules conflict below a
-certain account size — a 10-share QQQ lot is ~$6,000, so the band is only
-reachable above roughly $200k, and under ~$5,200 no QQQ order can be placed at
-all. Sizing takes the largest whole lot under the ceiling and records the
-shortfall; set `SHARE_LOT_SIZE=1` to size at the share level.
+Buys target 95–98% of available cash and always leave at least one share's
+worth of cash (plus the buffer) in the account. They are sized in whole lots
+of `SHARE_LOT_SIZE` shares when that still reaches 95% — on QQQ, roughly $200k
+and up. Smaller accounts are sized in single shares instead, so they are not
+left under-invested; set `SHARE_LOT_SIZE=1` to always size at the share level.
 
 ---
 

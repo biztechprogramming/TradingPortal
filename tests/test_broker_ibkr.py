@@ -442,3 +442,55 @@ def test_executions_group_into_one_fill_per_order():
     assert sale.average_fill_price == pytest.approx((70 * 27.85 + 930 * 27.86) / 1000)
     assert sale.updated_at == 1793973015.0
     assert fills["663127805"].filled_quantity == 2400
+
+
+# --- dropped trading session (401) ------------------------------------------
+
+
+def test_401_on_iserver_reauthenticates_and_retries(tmp_path, monkeypatch):
+    """IBKR drops the trading leg while the gateway login stays up. The order
+    POST must survive that: reauthenticate, then retry once."""
+    monkeypatch.setattr("trading.brokers.ibkr.time.sleep", lambda s: None)
+    calls: list[str] = []
+    state = {"down": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.replace("/v1/api", "")
+        calls.append(path)
+        if path == "/iserver/reauthenticate":
+            state["down"] = False
+            return httpx.Response(200, json={"message": "triggered"})
+        if path == "/iserver/auth/status":
+            return httpx.Response(200, json={"authenticated": not state["down"],
+                                             "connected": True})
+        if path == "/iserver/accounts":
+            return httpx.Response(200, json={"accounts": ["DU1234567"]})
+        if state["down"]:
+            return httpx.Response(401, json={"error": "not authenticated"})
+        return httpx.Response(200, json={"ok": True})
+
+    broker = broker_with(handler, tmp_path)
+    assert broker._request("POST", "/iserver/account/DU1234567/orders",
+                           json_body={}) == {"ok": True}
+    assert calls.count("/iserver/account/DU1234567/orders") == 2
+    assert "/iserver/reauthenticate" in calls
+
+
+def test_401_that_reauth_cannot_fix_still_raises(tmp_path, monkeypatch):
+    from trading.errors import BrokerAuthError
+    monkeypatch.setattr("trading.brokers.ibkr.time.sleep", lambda s: None)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.replace("/v1/api", "")
+        calls.append(path)
+        if path == "/iserver/auth/status":
+            return httpx.Response(200, json={"authenticated": False})
+        if path == "/iserver/reauthenticate":
+            return httpx.Response(200, json={})
+        return httpx.Response(401)
+
+    broker = broker_with(handler, tmp_path)
+    with pytest.raises(BrokerAuthError, match="orders returned 401"):
+        broker._request("POST", "/iserver/account/DU1234567/orders", json_body={})
+    assert calls.count("/iserver/account/DU1234567/orders") == 1

@@ -167,7 +167,10 @@ class IBKRBroker(Broker):
         retries: int = 2,
     ) -> Any:
         last_exc: Exception | None = None
-        for attempt in range(retries + 1):
+        reauthed = False
+        for attempt in range(retries + 2):  # +1 slot for a post-reauth retry
+            if attempt > retries and not reauthed:
+                break
             try:
                 resp = self._client.request(
                     method, path, params=params, json=json_body
@@ -191,9 +194,20 @@ class IBKRBroker(Broker):
                     time.sleep(1.0 + attempt)
                     continue
                 if resp.status_code == 401:
+                    # IBKR drops the trading (iserver) leg while the gateway
+                    # login stays up -- e.g. when IBKR Mobile or the website
+                    # takes over. A 401 means the request was NOT accepted, so
+                    # re-establishing the leg and retrying once is safe, even
+                    # for an order.
+                    if not reauthed and path.startswith("/iserver") \
+                            and not path.startswith("/iserver/auth") \
+                            and path != "/iserver/reauthenticate" \
+                            and self._revive_brokerage_session():
+                        reauthed = True
+                        continue
                     raise BrokerAuthError(
-                        "IBKR gateway session is not authenticated. Open "
-                        f"{self.base_url.replace('/v1/api', '')} and log in."
+                        f"IBKR gateway session is not authenticated ({method} "
+                        f"{path} returned 401); log in to IBKR again."
                     )
                 if resp.status_code >= 500:
                     if attempt >= retries or method in ("POST", "DELETE"):
@@ -227,6 +241,25 @@ class IBKRBroker(Broker):
             self._last_tickle = time.time()
         except Exception as exc:  # a failed tickle is not itself fatal
             log.debug("IBKR tickle failed: %s", exc)
+
+    def _revive_brokerage_session(self) -> bool:
+        """Re-establish IBKR's trading leg after a 401. True if it came back."""
+        try:
+            self._request("POST", "/iserver/reauthenticate", retries=0)
+            for _ in range(6):
+                time.sleep(1.0)
+                status = self.auth_status()
+                if status.get("authenticated"):
+                    # iserver endpoints want /iserver/accounts read first.
+                    self._request("GET", "/iserver/accounts", retries=1)
+                    log.warning("IBKR trading session dropped (401); "
+                                "re-authenticated and retrying")
+                    return True
+        except Exception as exc:
+            log.warning("IBKR re-authenticate after 401 failed: %s", exc)
+            return False
+        log.warning("IBKR re-authenticate after 401 did not restore the session")
+        return False
 
     def auth_status(self) -> dict[str, Any]:
         data = self._request("POST", "/iserver/auth/status", retries=1)

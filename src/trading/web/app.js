@@ -166,13 +166,11 @@ function renderBrokers(status) {
 
   $('brokers').innerHTML = Object.entries(status.brokers)
     .map(([name, b]) => {
-      const result = (status.state?.last_result?.results || [])
-        .find((r) => r.broker === name);
+      // Only what is wrong right now stays on the card. A failed command is
+      // a past event and is announced once, as a toast (toastCommandErrors).
       const errorHtml = b.error
         ? `<div class="alert alert-error" style="margin-top:10px">${esc(b.error)}</div>`
-        : (result?.errors?.length
-          ? `<div class="alert alert-error" style="margin-top:10px">${result.errors.map(esc).join('<br>')}</div>`
-          : '');
+        : '';
       const acct = b.account
         ? `${esc(b.account.display_id)}${b.account.is_paper ? ' <span class="pill pill-ok">PAPER</span>' : ''}`
         : '<span class="muted">none</span>';
@@ -1339,14 +1337,43 @@ async function restartIbkr() {
   refreshLogins();
 }
 
-function toast(message) {
+function toast(message, { error = false, ms = 4500 } = {}) {
+  let stack = $('toast-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toast-stack';
+    document.body.appendChild(stack);
+  }
   const el = document.createElement('div');
-  el.className = 'toast';
-  el.setAttribute('role', 'status');
+  el.className = error ? 'toast toast-error' : 'toast';
+  el.setAttribute('role', error ? 'alert' : 'status');
   el.textContent = message;
-  document.body.appendChild(el);
-  setTimeout(() => el.classList.add('toast-out'), 4500);
-  setTimeout(() => el.remove(), 5000);
+  el.title = 'Click to dismiss';
+  const close = () => { el.classList.add('toast-out'); setTimeout(() => el.remove(), 500); };
+  el.addEventListener('click', close);
+  stack.appendChild(el);
+  setTimeout(close, ms);
+}
+
+// Announce each failed command once, when it happens. Reloading the page
+// does not replay it, and nothing older than a few minutes is shown.
+const TOAST_MAX_AGE_S = 300;
+function toastCommandErrors(status) {
+  const last = status.state?.last_result;
+  if (!last?.command_id) return;
+  let seen = null;
+  try { seen = sessionStorage.getItem('toasted-command'); } catch { /* storage off */ }
+  if (seen === last.command_id) return;
+  try { sessionStorage.setItem('toasted-command', last.command_id); } catch { /* storage off */ }
+  const ageS = Date.now() / 1000 - (last.finished_at || 0);
+  if (ageS > TOAST_MAX_AGE_S) return;
+  const at = new Date((last.finished_at || 0) * 1000).toLocaleTimeString('en-US',
+    { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/New_York' });
+  for (const r of last.results || []) {
+    if (r.ok || !(r.errors || []).length) continue;
+    toast(`${last.command} failed at ${r.broker} (${at}): ${r.errors[0]}`,
+      { error: true, ms: 15000 });
+  }
 }
 
 async function logoutIbkr() {
@@ -1374,6 +1401,7 @@ async function refresh() {
     renderBanner(s);
     renderCombined(s.combined || {});
     renderBrokers(s);
+    toastCommandErrors(s);
     renderHoldings(holdings.body);
     renderEvents(audit.body.events || []);
     renderChart(perf.body);

@@ -152,6 +152,11 @@ dashboard, but every order path raises.
 | `IBKR_ACCOUNT_IDS` | Comma-separated, if you have several |
 | `IBKR_VERIFY_SSL` | `false` — the local gateway uses a self-signed certificate |
 | `IBKR_CONID_QQQ` / `_PSQ` | Optional. Pin them so symbol lookup cannot resolve the wrong listing |
+| `IBKR_BACKEND` | `tws` = IB Gateway + IBC + TWS API (the `ibgateway` compose service; one phone approval a week). `cp` = Client Portal + ibeam (default, the old path) |
+| `IBKR_TWS_HOST` / `IBKR_TWS_PORT` | `tws` only. Where IB Gateway's API listens: `127.0.0.1` / `4001` |
+| `IBKR_TWS_CLIENT_ID` | `tws` only, default `11`. Fixed so IBKR returns open orders after a reconnect; the gateway is set to treat it as master so it also sees orders placed in IBKR Mobile |
+| `IBKR_TWS_CONNECT_TIMEOUT` | `tws` only. Seconds to wait for the gateway socket before reporting IBKR down (default 15) |
+| `IBKR_READ_ONLY` | `true` shows IBKR accounts but never trades them — for proving a new gateway before it handles money |
 
 Start the gateway and log in first ([IBKR_SETUP.md](IBKR_SETUP.md)), then
 `cli accounts` will show the account id — you do not have to hunt for it.

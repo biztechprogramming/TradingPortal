@@ -33,8 +33,16 @@ from .oauth_listener import start_catcher
 
 log = logging.getLogger("trading.logins")
 
-#: Container name fixed in docker-compose.yml.
+#: Container names fixed in docker-compose.yml.
 IBEAM_CONTAINER = "qqq-ibeam"
+IBGATEWAY_CONTAINER = "qqq-ibgateway"
+
+
+def gateway_container(settings: Settings) -> tuple[str, str]:
+    """(container, compose service) for the configured IBKR backend."""
+    if settings.ibkr_backend == "tws":
+        return IBGATEWAY_CONTAINER, "ibgateway"
+    return IBEAM_CONTAINER, "ibeam"
 
 #: Where docker-compose.yml lives, for creating the container on first login.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -284,10 +292,10 @@ def _docker(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
     )
 
 
-def ibeam_running() -> bool | None:
+def ibeam_running(container: str = IBEAM_CONTAINER) -> bool | None:
     """True/False for the gateway container; None if Docker can't tell us."""
     try:
-        res = _docker("inspect", "-f", "{{.State.Running}}", IBEAM_CONTAINER, timeout=10)
+        res = _docker("inspect", "-f", "{{.State.Running}}", container, timeout=10)
     except (LoginError, subprocess.SubprocessError, OSError):
         return None
     if res.returncode != 0:
@@ -307,6 +315,7 @@ class IbkrGatewayRestart:
         end_session: Callable[[], None] | None = None,
     ) -> None:
         self.settings = settings
+        self.container, self.service = gateway_container(settings)
         self._on_authenticated = on_authenticated
         self._on_logged_out = on_logged_out or (lambda: None)
         self._probe = probe or self._gateway_authenticated
@@ -377,7 +386,7 @@ class IbkrGatewayRestart:
                 self._end_session()   # frees the session now, not on timeout
             except Exception as exc:
                 log.info("IBKR gateway logout call failed (stopping anyway): %s", exc)
-            res = _docker("stop", IBEAM_CONTAINER, timeout=60)
+            res = _docker("stop", self.container, timeout=60)
             if res.returncode != 0 and "No such container" not in res.stderr:
                 raise LoginError(f"docker stop failed: {res.stderr.strip()[:300]}")
             note = self._on_logged_out()
@@ -391,10 +400,14 @@ class IbkrGatewayRestart:
 
     def _run(self) -> None:
         try:
-            res = _docker("restart", IBEAM_CONTAINER, timeout=90)
+            other = IBEAM_CONTAINER if self.container != IBEAM_CONTAINER else IBGATEWAY_CONTAINER
+            # IBKR allows one session per username: the other gateway must
+            # not be holding it.
+            _docker("stop", other, timeout=60)
+            res = _docker("restart", self.container, timeout=90)
             if res.returncode != 0 and "No such container" in res.stderr:
                 # Never created (fresh clone, or removed): compose makes it.
-                res = _docker("compose", "up", "-d", "ibeam", timeout=180)
+                res = _docker("compose", "up", "-d", self.service, timeout=180)
             if res.returncode != 0:
                 raise LoginError(
                     f"Could not start the IBKR gateway: {res.stderr.strip()[:300]}"
@@ -409,7 +422,7 @@ class IbkrGatewayRestart:
                 raise LoginError(
                     "The gateway restarted but did not log in within "
                     f"{int(IBKR_AUTH_TIMEOUT)}s. Did the phone approval arrive? "
-                    "Check: docker compose logs -f ibeam"
+                    f"Check: docker compose logs -f {self.service}"
                 )
             note = self._on_authenticated()
             self._set(state="done", message=note or "IBKR gateway logged in.")
@@ -420,6 +433,19 @@ class IbkrGatewayRestart:
             self._set(state="failed", message=str(exc))
 
     def _gateway_authenticated(self) -> bool:
+        if self.settings.ibkr_backend == "tws":
+            # IB Gateway only opens its API port once the login (and the
+            # phone approval) has completed.
+            from .brokers.ibkr_session import shared_session
+
+            session = shared_session(self.settings.ibkr_tws_host,
+                                     self.settings.ibkr_tws_port,
+                                     self.settings.ibkr_tws_client_id)
+            try:
+                return session.wait_connected(2.0) and bool(
+                    session.call(lambda ib: list(ib.managedAccounts()), 5))
+            except Exception:
+                return False
         from .brokers.ibkr import IBKRBroker
 
         probe = IBKRBroker(self.settings)
@@ -431,6 +457,8 @@ class IbkrGatewayRestart:
             probe.close()
 
     def _gateway_logout(self) -> None:
+        if self.settings.ibkr_backend == "tws":
+            return   # stopping the container ends the IB Gateway session
         from .brokers.ibkr import IBKRBroker
 
         gateway = IBKRBroker(self.settings)

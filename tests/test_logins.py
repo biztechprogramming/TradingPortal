@@ -258,7 +258,28 @@ def test_ibkr_login_creates_a_missing_container(tmp_path, monkeypatch):
     )
     restart.restart()
     assert _wait_for(lambda: restart.status()["state"] == "done")
-    assert calls[1] == ("compose", "up", "-d", "ibeam")
+    assert calls[0] == ("stop", "qqq-ibgateway")   # one session per username
+    assert calls[-1] == ("compose", "up", "-d", "ibeam")
+
+
+def test_tws_backend_drives_the_ib_gateway_container(tmp_path, monkeypatch):
+    calls: list[tuple] = []
+
+    def docker(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "restart":
+            return _completed(1, "Error: No such container: qqq-ibgateway")
+        return _completed()
+
+    monkeypatch.setattr(L, "_docker", docker)
+    restart = L.IbkrGatewayRestart(
+        make_settings(tmp_path, ibkr_backend="tws"),
+        on_authenticated=lambda: "in", probe=lambda: True,
+    )
+    restart.restart()
+    assert _wait_for(lambda: restart.status()["state"] == "done")
+    assert calls[0] == ("stop", "qqq-ibeam")
+    assert calls[-1] == ("compose", "up", "-d", "ibgateway")
 
 
 def test_ibkr_logout_ends_session_then_stops_gateway(tmp_path, monkeypatch):
@@ -315,7 +336,7 @@ def test_gateway_that_logged_in_alone_is_picked_up_once(tmp_path):
 def client(tmp_path, monkeypatch, exchanged):
     from trading.api import create_app
 
-    monkeypatch.setattr("trading.api.ibeam_running", lambda: True)
+    monkeypatch.setattr("trading.api.ibeam_running", lambda *a: True)
     settings = _settings(tmp_path, api_token=TOKEN)
     brokers = {
         "schwab": make_broker(settings, "schwab", cash=50_000.0),

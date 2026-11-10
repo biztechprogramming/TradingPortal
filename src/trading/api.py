@@ -31,7 +31,7 @@ from .errors import (
     TradingError,
     UnreconciledState,
 )
-from .logins import IbkrGatewayRestart, LoginError, SchwabLoginFlow, ibeam_running, schwab_token_status
+from .logins import IbkrGatewayRestart, LoginError, SchwabLoginFlow, gateway_container, ibeam_running, schwab_token_status
 from .models import Command
 from .orchestrator import TradingService
 
@@ -473,7 +473,8 @@ def create_app(
         ]
         ibkr_enabled = "ibkr" in settings.brokers_enabled
         ibkr_connected = any(b.connected for b in ibkr_brokers)
-        gateway_running = ibeam_running() if ibkr_enabled else None
+        gateway_running = (ibeam_running(gateway_container(settings)[0])
+                           if ibkr_enabled else None)
         # Only chase a gateway that is actually up: a stopped one is the
         # logged-out state, not a fault to recover from.
         if ibkr_enabled and not ibkr_connected and gateway_running is not False:

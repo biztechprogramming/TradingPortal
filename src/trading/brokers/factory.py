@@ -53,9 +53,7 @@ def discover_accounts(broker_type: str, settings: Settings) -> list[tuple[str, A
         return found
 
     if broker_type == "ibkr":
-        from .ibkr import IBKRBroker
-
-        probe = IBKRBroker(settings)
+        probe = _ibkr_adapter(settings)
         try:
             accounts = probe.get_accounts()
         except Exception as exc:
@@ -80,10 +78,19 @@ def _build_adapter(
 
         return SchwabBroker(settings, login=login, account=account)
     if broker_type == "ibkr":
-        from .ibkr import IBKRBroker
-
-        return IBKRBroker(settings, account=account)
+        return _ibkr_adapter(settings, account=account)
     raise ConfigError(f"unknown broker {broker_type!r}")
+
+
+def _ibkr_adapter(settings: Settings, account: Account | None = None) -> Broker:
+    """The IBKR adapter for the configured backend (IBKR_BACKEND)."""
+    if settings.ibkr_backend == "tws":
+        from .ibkr_tws import IBKRTwsBroker
+
+        return IBKRTwsBroker(settings, account=account)
+    from .ibkr import IBKRBroker
+
+    return IBKRBroker(settings, account=account)
 
 
 # --- mode wrapping -----------------------------------------------------------
@@ -115,6 +122,9 @@ def apply_permissions(broker: Broker, settings: Settings, account: Account) -> B
     # ``display_id`` is the masked number for Schwab and the id for IBKR;
     # both are what the allowlist is written against.
     identifier = account.display_id or account.account_id
+    if broker.broker_type == "ibkr" and settings.ibkr_read_only:
+        log.info("%s: IBKR_READ_ONLY=true — read-only", broker.name)
+        return ReadOnlyBroker(broker, settings)
     if settings.may_trade_account(identifier):
         return broker
     log.info(
@@ -170,9 +180,8 @@ def build_broker(name: str, settings: Settings) -> Broker:
 
         return apply_mode(SchwabBroker(settings), settings)
     if name == "ibkr":
-        from .ibkr import IBKRBroker
-
-        return apply_mode(IBKRBroker(settings), settings)
+        adapter = apply_mode(_ibkr_adapter(settings), settings)
+        return ReadOnlyBroker(adapter, settings) if settings.ibkr_read_only else adapter
     raise ConfigError(f"unknown broker {name!r}")
 
 
@@ -273,8 +282,8 @@ def verify_environment(broker: Broker, settings: Settings) -> list[str]:
         if not acct.is_paper and not broker.read_only:
             raise ConfigError(
                 f"TRADING_MODE=paper but the connected IBKR account "
-                f"{acct.display_id} is a LIVE account. Log the Client Portal "
-                "Gateway into your paper credentials, or switch modes "
+                f"{acct.display_id} is a LIVE account. Log the IBKR gateway "
+                "into your paper credentials, or switch modes "
                 "deliberately."
             )
 

@@ -131,6 +131,58 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ---------------------------------------------------------------------
+  # IB Gateway + IBC (IBKR_BACKEND=tws). Replaces ibeam + Client Portal.
+  #
+  # IBC logs in with the same IBKR credentials ibeam used, then restarts the
+  # gateway every night at AUTO_RESTART_TIME *without* a new login. IBKR asks
+  # for the phone approval only on the first login, and again once a week:
+  # at the first restart after Sunday 01:00 ET (so Sunday 8:05 PM ET).
+  #
+  # Not started by ./start, for the same reason as ibeam: IBKR allows one
+  # session per username. The dashboard's Log in starts it and stops ibeam.
+  # restart "no": a missed phone approval must not loop more approvals all
+  # night; Log in starts it again.
+  # ---------------------------------------------------------------------
+  ibgateway:
+    image: gnzsnz/ib-gateway:10.50.1f
+    container_name: qqq-ibgateway
+    profiles: ["tws"]
+    environment:
+      TWS_USERID: ${IBEAM_ACCOUNT:-}
+      TWS_PASSWORD: ${IBEAM_PASSWORD:-}
+      TRADING_MODE: live
+      READ_ONLY_API: "no"
+      # Our app's client id: as master it sees and can cancel every order,
+      # including ones placed in IBKR Mobile or the website.
+      TWS_MASTER_CLIENT_ID: ${IBKR_TWS_CLIENT_ID:-11}
+      TWS_ACCEPT_INCOMING: accept
+      # Skip the API order "precaution" pop-ups (size limit, no market data),
+      # the TWS-API equivalent of the prompts ibkr.py auto-answered.
+      BYPASS_WARNING: "yes"
+      TIME_ZONE: America/New_York
+      # After extended hours (8 PM ET) and before IBKR's nightly reset.
+      AUTO_RESTART_TIME: "08:05 PM"
+      TWOFA_TIMEOUT_ACTION: exit
+      RELOGIN_AFTER_TWOFA_TIMEOUT: "no"
+      # Seconds to wait for the login to finish after the phone approval.
+      TWOFA_EXIT_INTERVAL: 120
+      EXISTING_SESSION_DETECTED_ACTION: primary
+      TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
+    volumes:
+      - qqq-ibgateway:/home/ibgateway/tws_settings
+    ports:
+      # Loopback only. 4003 is the container's socat relay to the live API.
+      - "127.0.0.1:4001:4003"
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   qqq-state:
     name: qqq-switch-state
+  qqq-ibgateway:
+    name: qqq-ibgateway-settings

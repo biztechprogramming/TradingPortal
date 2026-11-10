@@ -47,12 +47,16 @@ fi
 # --- IBKR gateway ------------------------------------------------------------
 step "IBKR gateway"
 if docker info >/dev/null 2>&1; then
+    stopped=""
     if [ -n "$(docker ps -q -f name=qqq-ibeam)" ]; then
         docker compose stop ibeam >/dev/null 2>&1
-        echo "    stopped"
-    else
-        echo "    not running"
+        stopped="ibeam"
     fi
+    if [ -n "$(docker ps -q -f name=qqq-ibgateway)" ]; then
+        docker stop qqq-ibgateway >/dev/null 2>&1
+        stopped="${stopped:+$stopped, }IB Gateway"
+    fi
+    echo "    ${stopped:+stopped $stopped}${stopped:-not running}"
     # The app container is not part of ./start, but stop it if something else
     # left it up — two dashboards on one set of accounts is a bad surprise.
     if [ -n "$(docker ps -q -f name=qqq-switch)" ]; then

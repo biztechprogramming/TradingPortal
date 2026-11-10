@@ -25,7 +25,7 @@ fail() { printf '%s XX %s%s\n' "$RED" "$1" "$OFF"; }
 # out from the dashboard's Logins panel instead.
 step "IBKR gateway"
 
-if [ -n "$(docker ps -q -f name=qqq-ibeam 2>/dev/null)" ]; then
+if [ -n "$(docker ps -q -f name=qqq-ibeam -f name=qqq-ibgateway 2>/dev/null)" ]; then
     echo "    running (logged in) — use Log out on the dashboard to free the session"
 else
     echo "    not started — click Log in on the dashboard when you want IBKR"

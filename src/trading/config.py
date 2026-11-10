@@ -70,6 +70,13 @@ def _float(name: str, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _ibkr_backend() -> str:
+    value = (_env("IBKR_BACKEND", "cp") or "cp").strip().lower()
+    if value not in ("cp", "tws"):
+        raise ConfigError(f"IBKR_BACKEND must be 'cp' or 'tws', not {value!r}")
+    return value
+
+
 def _int(name: str, default: int) -> int:
     raw = _env(name)
     if raw is None:
@@ -139,6 +146,17 @@ class Settings:
     ibkr_conid_overrides: dict[str, int] = field(default_factory=dict)
     ibkr_allow_delayed_quotes: bool = False
     ibkr_auto_confirm_all_questions: bool = False
+    #: "tws" = IB Gateway + TWS API (ibkr_tws.py); "cp" = Client Portal
+    #: gateway + ibeam (ibkr.py), kept as the fallback.
+    ibkr_backend: str = "cp"
+    ibkr_tws_host: str = "127.0.0.1"
+    ibkr_tws_port: int = 4001
+    #: Fixed so IBKR hands open orders back after a reconnect. IB Gateway is
+    #: configured with this as its master client id.
+    ibkr_tws_client_id: int = 11
+    ibkr_tws_connect_timeout: float = 15.0
+    #: Show IBKR but never trade it, e.g. while proving a new gateway.
+    ibkr_read_only: bool = False
 
     # --- account permissions ---------------------------------------------
     #: Accounts the trade commands may touch, by full number or last 4 digits.
@@ -580,6 +598,12 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         ibkr_conid_overrides=conid_overrides,
         ibkr_allow_delayed_quotes=_bool("IBKR_ALLOW_DELAYED_QUOTES", False),
         ibkr_auto_confirm_all_questions=_bool("IBKR_AUTO_CONFIRM_ALL_QUESTIONS", False),
+        ibkr_backend=_ibkr_backend(),
+        ibkr_tws_host=_env("IBKR_TWS_HOST", "127.0.0.1") or "127.0.0.1",
+        ibkr_tws_port=_int("IBKR_TWS_PORT", 4001),
+        ibkr_tws_client_id=_int("IBKR_TWS_CLIENT_ID", 11),
+        ibkr_tws_connect_timeout=_float("IBKR_TWS_CONNECT_TIMEOUT", 15.0),
+        ibkr_read_only=_bool("IBKR_READ_ONLY", False),
         cash_buffer_dollars=_float("CASH_BUFFER_DOLLARS", 25.0),
         allow_margin=_bool("ALLOW_MARGIN", False),
         max_order_notional_dollars=_float("MAX_ORDER_NOTIONAL_DOLLARS", 0.0),

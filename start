@@ -34,8 +34,23 @@ fi
 # --- 2. dashboard ------------------------------------------------------------
 step "Dashboard"
 
+# Bind the Tailscale interface so every machine on the tailnet reaches the
+# dashboard. .env keeps API_HOST=127.0.0.1 as the safe default and the app's
+# load_dotenv() does not override a real env var, so this widens the bind only
+# while Tailscale is actually up -- and onto the tailnet alone, never the LAN.
+TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+if [ -n "$TS_IP" ]; then
+    export API_HOST="$TS_IP"
+    echo "    binding $TS_IP (Tailscale)"
+else
+    warn "Tailscale is down - binding 127.0.0.1, reachable from this machine only"
+fi
+
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "    already running (pid $(cat "$PIDFILE"))"
+    if [ -n "$TS_IP" ]; then
+        warn "a running dashboard keeps its old bind: ./stop && ./start to move it to $TS_IP"
+    fi
 else
     rm -f "$PIDFILE"
     nohup ./qqq serve >"$LOGFILE" 2>&1 &
@@ -54,11 +69,17 @@ TOKEN="$(./ensure-token)"
 PORT="$(grep -E '^API_PORT=.+' .env | head -1 | cut -d= -f2- || true)"
 PORT="${PORT:-8787}"
 
+TSLINE=""
+if [ -n "$TS_IP" ]; then
+    TSLINE="
+  Tailnet: ${YELLOW}http://${TS_IP}:${PORT}/?token=${TOKEN}${OFF}   ${DIM}(any machine on the tailnet)${OFF}"
+fi
+
 cat <<BANNER
 
 ${GREEN}Everything is up.${OFF} Log in to Schwab and IBKR from the dashboard's Logins panel.
 
-  Open:   ${YELLOW}http://localhost:${PORT}/${OFF}   ${DIM}(forward port ${PORT} in VS Code's PORTS panel)${OFF}
+  Open:   ${YELLOW}http://localhost:${PORT}/?token=${TOKEN}${OFF}   ${DIM}(forward port ${PORT} in VS Code's PORTS panel)${OFF}${TSLINE}
   Token:  ${YELLOW}${TOKEN}${OFF}
 
 ${DIM}  Schwab login needs port 8182 forwarded too.  Logs: tail -f ${LOGFILE}   Stop: ./stop${OFF}

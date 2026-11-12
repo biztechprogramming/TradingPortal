@@ -21,7 +21,7 @@ one:
 
 | Option | Security | Notes |
 |---|---|---|
-| **Tailscale / WireGuard** (recommended) | Best | Keep `API_HOST=127.0.0.1`, reach it over the VPN address. Nothing is exposed publicly. |
+| **Tailscale** (recommended, and what `./start` does) | Best | `./start` binds the machine's Tailscale IPv4 when the tailnet is up, so any machine on it reaches `http://<tailscale-ip>:8787/`. Nothing is exposed to the LAN or publicly. `API_HOST=127.0.0.1` stays the default when Tailscale is down. |
 | SSH tunnel from the phone | Good | Works with Shortcuts + a terminal app, fiddly. |
 | LAN bind (`API_HOST=0.0.0.0`) | Weakest | Anyone on the network can reach the port. Only with a strong token, and never on untrusted Wi-Fi. |
 

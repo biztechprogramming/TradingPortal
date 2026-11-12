@@ -120,6 +120,12 @@ class ReadOnlyBroker(Broker):
         self._refuse(f"{side.value} {quantity} {symbol}")
         raise AssertionError("unreachable")
 
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        self._refuse(f"{side.value} {quantity} {symbol} at market")
+        raise AssertionError("unreachable")
+
     def replace_order(self, order_id: str, limit_price: float) -> Order:
         self._refuse(f"replace of order {order_id}")
         raise AssertionError("unreachable")

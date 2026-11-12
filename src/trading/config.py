@@ -33,9 +33,10 @@ DEFAULT_MAX_SLIPPAGE_TICKS: dict[str, float] = {"QQQ": 25.0, "PSQ": 10.0}
 FALLBACK_MAX_SLIPPAGE_TICKS = 25.0
 
 #: Widest spread, in ticks, we will price an order against. QQQ is penny-wide
-#: essentially all session, so anything past a nickel is a dislocation rather
-#: than a normal book. Override with ``MAX_SPREAD_TICKS_<SYMBOL>``.
-DEFAULT_MAX_SPREAD_TICKS: dict[str, float] = {"QQQ": 5.0, "PSQ": 10.0}
+#: most of the session but runs 5-10 cents in the first minutes after the
+#: open, so a dime is the default. Override with ``MAX_SPREAD_TICKS_<SYMBOL>``,
+#: or per command with the dashboard's spread slider.
+DEFAULT_MAX_SPREAD_TICKS: dict[str, float] = {"QQQ": 10.0, "PSQ": 10.0}
 FALLBACK_MAX_SPREAD_TICKS = 10.0
 
 #: Substrings that mark an environment variable as secret. Used by the
@@ -424,6 +425,7 @@ class Settings:
             "max_slippage_bps": self.max_slippage_bps,
             "reprice_step_bps": self.reprice_step_bps,
             "max_spread_bps": self.max_spread_bps,
+            "tick_size": self.tick_size,
             "max_quote_age_seconds": self.max_quote_age_seconds,
             "order_fill_timeout_seconds": self.order_fill_timeout_seconds,
             "max_reprice_attempts": self.max_reprice_attempts,

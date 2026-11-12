@@ -30,6 +30,38 @@
     </button>
   </section>
 
+  <section class="spread-control">
+    <label for="spread-slider">Max spread</label>
+    <input id="spread-slider" type="range" min="1" max="50" step="1" value="10">
+    <span id="spread-readout" class="spread-readout">10¢</span>
+    <button id="spread-reset" class="small" type="button">Default</button>
+  </section>
+
+  <section id="market-actions" class="market-actions hidden">
+    <div class="market-head">
+      <strong>At market</strong>
+      <span class="muted">Regular hours only. Fills at whatever price is
+        there now, with no spread check. Each one asks for confirmation.</span>
+    </div>
+    <div class="actions market-grid">
+      <button id="btn-mkt-long" class="action action-long action-market"
+              data-command="GO_LONG">
+        <span class="action-title">BUY <span class="mkt-long-sym">QQQ</span></span>
+        <span class="action-sub">AT MARKET</span>
+      </button>
+      <button id="btn-mkt-short" class="action action-short action-market"
+              data-command="GO_SHORT">
+        <span class="action-title">BUY <span class="mkt-short-sym">PSQ</span></span>
+        <span class="action-sub">AT MARKET</span>
+      </button>
+      <button id="btn-mkt-flat" class="action action-flat action-market"
+              data-command="GO_FLAT">
+        <span class="action-title">FLAT</span>
+        <span class="action-sub">AT MARKET</span>
+      </button>
+    </div>
+  </section>
+
   <section id="alerts"></section>
 
   <section class="panel">

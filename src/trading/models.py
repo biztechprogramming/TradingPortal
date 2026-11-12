@@ -201,6 +201,9 @@ class Order:
     submitted_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     simulated: bool = False
+    #: "LIMIT" or "MARKET". A market order's ``limit_price`` is only the
+    #: price it was sized against, not a bound on the fill.
+    order_type: str = "LIMIT"
 
     @property
     def remaining_quantity(self) -> float:
@@ -369,6 +372,8 @@ class CommandResult:
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
     aborted_reason: str | None = None
+    #: "LIMIT" (marketable limits, repriced) or "MARKET" (market orders).
+    order_type: str = "LIMIT"
 
     @property
     def all_ok(self) -> bool:
@@ -399,6 +404,7 @@ class CommandResult:
         return {
             "command_id": self.command_id,
             "command": self.command.value,
+            "order_type": self.order_type,
             "mode": self.mode.value,
             "status": self.status,
             "mismatch": self.mismatch,

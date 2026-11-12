@@ -369,6 +369,100 @@ class ExecutionEngine:
         self._log(A.ORDER_FILLED, broker.name, fill=fill.to_dict())
         return fill
 
+    # --- market orders ----------------------------------------------------
+
+    def execute_market_leg(
+        self, broker: Broker, req: LegRequest, estimate_price: float
+    ) -> Fill:
+        """Submit one market order and wait for it to fill.
+
+        ``estimate_price`` is the price the leg was sized against, used only
+        for pre-submit validation; the fill price is whatever the market gives.
+        There is no repricing: a market order either fills or something is
+        wrong, and on timeout the remainder is cancelled.
+        """
+        state = _LegState(requested=int(req.quantity))
+        record = validate_order(
+            symbol=req.symbol,
+            side=req.side,
+            quantity=req.quantity,
+            limit_price=estimate_price,
+            account_id=broker.account.account_id if broker.account else None,
+            settings=self.settings,
+            balances=req.balances,
+            position_quantity=req.position_quantity,
+        )
+        self._log(
+            A.ORDER_VALIDATED, broker.name, validation=record,
+            order_type="MARKET", estimate_price=estimate_price,
+        )
+
+        order = broker.submit_market_order(req.symbol, req.side, int(req.quantity))
+        state.record(order)
+        self._log(
+            A.ORDER_SUBMITTED, broker.name, order=order.to_dict(),
+            order_type="MARKET", simulated=order.simulated,
+        )
+
+        deadline = self._clock() + self.settings.order_fill_timeout_seconds
+        abort_error: TradingError | None = None
+        while True:
+            order = broker.get_order_status(order.order_id)
+            state.record(order)
+            if order.state is OrderState.FILLED and state.remaining == 0:
+                break
+            if order.state is OrderState.REJECTED:
+                self._log(
+                    A.ORDER_REJECTED_EVT, broker.name, order=order.to_dict(),
+                    message=order.status_message,
+                )
+                abort_error = OrderRejected(
+                    f"{broker.name}: {req.side.value} {req.symbol} at market "
+                    "rejected"
+                    + (f": {order.status_message}" if order.status_message else "")
+                )
+                break
+            if order.state.is_terminal:
+                break
+            if self._clock() >= deadline:
+                abort_error = OrderTimeout(
+                    f"{broker.name}: market {req.side.value} {req.symbol} did "
+                    f"not complete within "
+                    f"{self.settings.order_fill_timeout_seconds}s "
+                    f"({state.filled:g}/{state.requested} filled)"
+                )
+                break
+            self._sleep(self.settings.order_poll_interval_seconds)
+
+        final_order = self._ensure_closed(broker, order, state)
+        state.record(final_order)
+
+        fill = Fill(
+            symbol=req.symbol,
+            side=req.side,
+            requested_quantity=state.requested,
+            filled_quantity=state.filled,
+            average_price=round(state.average_price, 6),
+            order_ids=list(state.order_ids),
+            complete=state.remaining == 0 and state.filled > 0,
+            notes=state.notes + ["market order"],
+        )
+        self._log(
+            A.LEG_COMPLETE if fill.complete else A.ORDER_PARTIAL,
+            broker.name, fill=fill.to_dict(), order_type="MARKET",
+            aborted=str(abort_error) if abort_error else None,
+        )
+        if abort_error is None and not fill.complete:
+            abort_error = OrderTimeout(
+                f"{broker.name}: market {req.side.value} {req.symbol} filled "
+                f"{state.filled:g} of {state.requested}"
+            )
+        if abort_error is not None:
+            abort_error.fill = fill  # type: ignore[attr-defined]
+            raise abort_error
+        self._log(A.ORDER_FILLED, broker.name, fill=fill.to_dict())
+        return fill
+
     # --- repricing --------------------------------------------------------
 
     def _maybe_reprice(

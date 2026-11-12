@@ -58,7 +58,7 @@ from .models import (
 )
 from .state import StateStore
 from .strategy import Strategy
-from .validation import market_status
+from .validation import check_regular_session, market_status
 
 log = logging.getLogger("trading.orchestrator")
 
@@ -798,7 +798,16 @@ class TradingService:
         confirm_token: str | None = None,
         force: bool = False,
         source: str = "api",
+        market: bool = False,
+        spread_scale: float | None = None,
     ) -> CommandResult:
+        """Run one command across every tradable account.
+
+        ``market`` sends market orders instead of repriced limits; it always
+        needs confirmation and only runs in the regular session.
+        ``spread_scale`` multiplies the configured maximum spread for this
+        command alone (the dashboard's spread slider).
+        """
         command_id = new_command_id()
         self.audit.record(
             A.COMMAND_RECEIVED,
@@ -808,10 +817,16 @@ class TradingService:
             source=source,
             request_id=request_id,
             force=force,
+            order_type="MARKET" if market else "LIMIT",
+            spread_scale=spread_scale,
         )
 
         try:
-            self._preflight(command, request_id, confirm_token, force, command_id)
+            if market:
+                check_regular_session(self.settings)
+            settings = self._command_settings(market, spread_scale)
+            self._preflight(command, request_id, confirm_token, force,
+                            command_id, market=market)
         except TradingError as exc:
             self.audit.record(
                 A.COMMAND_REJECTED,
@@ -828,7 +843,7 @@ class TradingService:
                     A.LOCK_ACQUIRED, command_id=command_id, command=command.value
                 )
                 self.state.record_command(command.value, command_id, request_id)
-                return self._run_all(command, command_id)
+                return self._run_all(command, command_id, settings, market)
         except TradingError as exc:
             if isinstance(exc, ExecutionLocked):
                 self.audit.record(
@@ -846,6 +861,7 @@ class TradingService:
         confirm_token: str | None,
         force: bool,
         command_id: str,
+        market: bool = False,
     ) -> None:
         """Every gate that can reject a command before the lock is taken."""
         # A prior broker disagreement blocks everything except GO FLAT, which
@@ -861,12 +877,15 @@ class TradingService:
             force=force,
         )
 
-        if self._needs_confirmation(command):
+        # A market order's confirmation is keyed separately, so a token
+        # issued for a limit command can never authorise a market one.
+        key = f"{command.value}:MARKET" if market else command.value
+        if market or self._needs_confirmation(command):
             if not confirm_token or not self.state.consume_confirmation(
-                confirm_token, command.value
+                confirm_token, key
             ):
                 pending = self.state.issue_confirmation(
-                    command.value, self.settings.confirmation_ttl_seconds
+                    key, self.settings.confirmation_ttl_seconds
                 )
                 self.audit.record(
                     A.CONFIRMATION_ISSUED,
@@ -874,8 +893,14 @@ class TradingService:
                     command=command.value,
                     expires_at=pending.expires_at,
                 )
-                raise ConfirmationRequired(
+                what = (
+                    f"{command.value} AT MARKET fills at whatever price is "
+                    "available now, with no limit. "
+                    if market else
                     f"{command.value} in LIVE mode deploys the whole account. "
+                )
+                raise ConfirmationRequired(
+                    what +
                     "Re-send the command with this confirmation token within "
                     f"{self.settings.confirmation_ttl_seconds:.0f}s to proceed.",
                     pending.token,
@@ -886,6 +911,43 @@ class TradingService:
                 command_id=command_id,
                 command=command.value,
             )
+
+    #: Bounds on the dashboard's spread slider, as a multiple of the
+    #: configured maximum. Wide enough to be useful, not wide enough to
+    #: switch the check off by accident.
+    SPREAD_SCALE_MIN = 0.1
+    SPREAD_SCALE_MAX = 10.0
+
+    def _command_settings(
+        self, market: bool, spread_scale: float | None
+    ) -> Settings:
+        """Settings for one command, with its spread overrides applied."""
+        settings = self.settings
+        if spread_scale is not None and spread_scale != 1.0:
+            if not (self.SPREAD_SCALE_MIN <= spread_scale <= self.SPREAD_SCALE_MAX):
+                raise OrderValidationError(
+                    f"spread_scale {spread_scale:g} is outside "
+                    f"{self.SPREAD_SCALE_MIN:g}-{self.SPREAD_SCALE_MAX:g}"
+                )
+            settings = replace(
+                settings,
+                max_spread_ticks_by_symbol={
+                    sym: settings.max_spread_ticks_for(sym) * spread_scale
+                    for sym in settings.symbols
+                },
+                # The bps backstop widens with the slider too, or a wider
+                # setting would be silently capped on the cheaper symbol.
+                max_spread_bps=settings.max_spread_bps * max(1.0, spread_scale),
+            )
+        if market:
+            # A market order is placed to get in now, so the tick limit on
+            # the spread does not apply; the bps backstop still does, so a
+            # broken or one-sided book is still refused.
+            settings = replace(
+                settings,
+                max_spread_ticks_by_symbol={sym: 0.0 for sym in settings.symbols},
+            )
+        return settings
 
     def _needs_confirmation(self, command: Command) -> bool:
         """Live LONG/SHORT commands deploy the entire account, so they confirm.
@@ -923,9 +985,17 @@ class TradingService:
                 log.info("%s: cannot lend a %s quote: %s", name, symbol, exc)
         return None
 
-    def _run_all(self, command: Command, command_id: str) -> CommandResult:
+    def _run_all(
+        self,
+        command: Command,
+        command_id: str,
+        settings: Settings | None = None,
+        market: bool = False,
+    ) -> CommandResult:
+        settings = settings or self.settings
         result = CommandResult(
-            command_id=command_id, command=command, mode=self.settings.mode
+            command_id=command_id, command=command, mode=self.settings.mode,
+            order_type="MARKET" if market else "LIMIT",
         )
         targets = self.tradable_brokers
         self.audit.record(
@@ -940,8 +1010,8 @@ class TradingService:
 
         def run_one(name: str, broker: Broker) -> BrokerResult:
             strategy = Strategy(
-                self.settings, self.audit, command_id,
-                quote_fallback=self._borrow_quote,
+                settings, self.audit, command_id,
+                quote_fallback=self._borrow_quote, market=market,
             )
             return strategy.run(broker, command)
 

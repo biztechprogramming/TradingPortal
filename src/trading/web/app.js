@@ -142,6 +142,8 @@ function renderCombined(c) {
   if (c.chart_symbols?.length) chartSymbols = c.chart_symbols;
   $('long-sub').textContent = longSymbol;
   $('short-sub').textContent = shortSymbol;
+  for (const el of document.querySelectorAll('.mkt-long-sym')) el.textContent = longSymbol;
+  for (const el of document.querySelectorAll('.mkt-short-sym')) el.textContent = shortSymbol;
 
   const stats = [
     ['Exposure', `<span class="pill pill-${c.exposure}">${c.exposure}</span>`],
@@ -1371,7 +1373,8 @@ function toastCommandErrors(status) {
     { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/New_York' });
   for (const r of last.results || []) {
     if (r.ok || !(r.errors || []).length) continue;
-    toast(`${last.command} failed at ${r.broker} (${at}): ${r.errors[0]}`,
+    const label = last.order_type === 'MARKET' ? marketLabel(last.command) : last.command;
+    toast(`${label} failed at ${r.broker} (${at}): ${r.errors[0]}`,
       { error: true, ms: 15000 });
   }
 }
@@ -1400,6 +1403,10 @@ async function refresh() {
     const s = status.body;
     renderBanner(s);
     renderCombined(s.combined || {});
+    renderSpreadControl(s.config || {});
+    // Market-order buttons exist only while the regular session is running;
+    // the server refuses them outside it regardless.
+    $('market-actions').classList.toggle('hidden', s.market?.session !== 'regular');
     renderBrokers(s);
     toastCommandErrors(s);
     renderHoldings(holdings.body);
@@ -1437,9 +1444,83 @@ async function refresh() {
 
 // --- commands ---------------------------------------------------------------
 
+// --- spread slider ----------------------------------------------------------
+// The slider is in ticks of the long symbol's maximum spread. It is sent as a
+// multiple of the configured limit, so the short symbol scales with it. The
+// chosen value is kept per browser; the server default is the configured one.
+
+const SPREAD_KEY = 'spread_ticks';
+let spreadDefaultTicks = null;   // long symbol's configured limit, in ticks
+let spreadShortTicks = null;     // short symbol's configured limit, in ticks
+let spreadTickSize = 0.01;
+
+function storedSpread() {
+  try { return Number(localStorage.getItem(SPREAD_KEY)) || null; } catch { return null; }
+}
+function storeSpread(ticks) {
+  try {
+    if (ticks === null) localStorage.removeItem(SPREAD_KEY);
+    else localStorage.setItem(SPREAD_KEY, String(ticks));
+  } catch { /* storage unavailable: the slider still works for this page */ }
+}
+
+function renderSpreadControl(cfg) {
+  const def = cfg.max_spread_ticks?.[longSymbol];
+  if (!def) return;
+  const first = spreadDefaultTicks === null;
+  spreadDefaultTicks = def;
+  spreadShortTicks = cfg.max_spread_ticks?.[shortSymbol] ?? def;
+  spreadTickSize = cfg.tick_size || 0.01;
+  const slider = $('spread-slider');
+  // The server accepts 0.1x-10x of the configured limit.
+  slider.min = String(Math.max(1, Math.ceil(def * 0.1)));
+  slider.max = String(Math.min(50, Math.floor(def * 10)));
+  if (first) slider.value = String(storedSpread() ?? def);
+  updateSpreadReadout();
+}
+
+function spreadScale() {
+  if (!spreadDefaultTicks) return null;
+  const scale = Number($('spread-slider').value) / spreadDefaultTicks;
+  return Math.abs(scale - 1) < 1e-9 ? null : Number(scale.toFixed(4));
+}
+
+function fmtSpread(ticks) {
+  const dollars = ticks * spreadTickSize;
+  return dollars < 1 ? `${+(dollars * 100).toFixed(1)}¢` : `$${dollars.toFixed(2)}`;
+}
+
+function updateSpreadReadout() {
+  if (!spreadDefaultTicks) return;
+  const ticks = Number($('spread-slider').value);
+  const scale = ticks / spreadDefaultTicks;
+  const isDefault = Math.abs(scale - 1) < 1e-9;
+  const out = $('spread-readout');
+  out.textContent = `${longSymbol} ${fmtSpread(ticks)} · ${shortSymbol} `
+    + `${fmtSpread(spreadShortTicks * scale)}${isDefault ? ' (default)' : ''}`;
+  out.classList.toggle('spread-off-default', !isDefault);
+  $('spread-reset').disabled = isDefault || busy;
+}
+
+$('spread-slider').addEventListener('input', () => {
+  const ticks = Number($('spread-slider').value);
+  storeSpread(ticks === spreadDefaultTicks ? null : ticks);
+  updateSpreadReadout();
+});
+$('spread-reset').addEventListener('click', () => {
+  if (!spreadDefaultTicks) return;
+  $('spread-slider').value = String(spreadDefaultTicks);
+  storeSpread(null);
+  updateSpreadReadout();
+});
+
+const COMMAND_BUTTONS = [
+  'btn-long', 'btn-short', 'btn-flat', 'btn-mkt-long', 'btn-mkt-short', 'btn-mkt-flat',
+];
+
 function setBusy(state) {
   busy = state;
-  for (const id of ['btn-long', 'btn-short', 'btn-flat']) $(id).disabled = state;
+  for (const id of COMMAND_BUTTONS) $(id).disabled = state;
   for (const btn of document.querySelectorAll(
     '.rung, .buy-btn, .buy-now-btn, .step-btn, .reset-btn')) {
     btn.disabled = state || (btn.classList.contains('buy-now-btn')
@@ -1463,32 +1544,54 @@ function askConfirm(title, body) {
   });
 }
 
-async function sendCommand(command) {
+function marketLabel(command) {
+  if (command === 'GO_LONG') return `BUY ${longSymbol} AT MARKET`;
+  if (command === 'GO_SHORT') return `BUY ${shortSymbol} AT MARKET`;
+  return 'FLAT AT MARKET';
+}
+
+function marketConfirmBody(command, detail) {
+  const target = command === 'GO_LONG' ? longSymbol : shortSymbol;
+  const other = command === 'GO_LONG' ? shortSymbol : longSymbol;
+  const what = command === 'GO_FLAT'
+    ? `Sells all ${esc(longSymbol)} and ${esc(shortSymbol)} in every account.`
+    : `Sells any ${esc(other)}, then buys ${esc(target)} with the available
+       cash in every account.`;
+  return `<p class="confirm-warn"><strong>Market orders fill at whatever price
+    is available now.</strong> There is no limit price and no spread check.</p>
+    <p>${what}</p><p class="muted">${esc(detail)}</p>`;
+}
+
+async function sendCommand(command, { market = false } = {}) {
   if (busy) return;
   const requestId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const label = market ? marketLabel(command) : command;
+  const body = { command, request_id: requestId };
+  if (market) body.order_type = 'MARKET';
+  else {
+    const scale = spreadScale();
+    if (scale !== null) body.spread_scale = scale;
+  }
   setBusy(true);
   try {
-    let res = await api('/api/command', {
-      method: 'POST',
-      body: JSON.stringify({ command, request_id: requestId }),
-    });
+    let res = await api('/api/command', { method: 'POST', body: JSON.stringify(body) });
 
     if (res.status === 409 && res.body.status === 'CONFIRMATION_REQUIRED') {
       const ok = await askConfirm(
-        `Confirm ${command.replace('_', ' ')}`,
-        `<strong>This is a LIVE order and will deploy the whole account.</strong>
-         <br><br>${esc(res.body.detail)}`,
+        `Confirm ${market ? label : command.replace('_', ' ')}`,
+        market
+          ? marketConfirmBody(command, res.body.detail)
+          : `<strong>This is a LIVE order and will deploy the whole account.</strong>
+             <br><br>${esc(res.body.detail)}`,
       );
       if (!ok) { setBusy(false); return; }
       res = await api('/api/command', {
         method: 'POST',
-        body: JSON.stringify({
-          command, request_id: requestId, confirm_token: res.body.confirm_token,
-        }),
+        body: JSON.stringify({ ...body, confirm_token: res.body.confirm_token }),
       });
     }
 
-    reportResult(command, res);
+    reportResult(label, res);
   } catch (err) {
     setAlerts([{ level: 'error', html: esc(String(err)) }]);
   } finally {
@@ -1527,6 +1630,10 @@ function reportResult(command, res) {
 for (const id of ['btn-long', 'btn-short', 'btn-flat']) {
   $(id).addEventListener('click', (e) =>
     sendCommand(e.currentTarget.dataset.command));
+}
+for (const id of ['btn-mkt-long', 'btn-mkt-short', 'btn-mkt-flat']) {
+  $(id).addEventListener('click', (e) =>
+    sendCommand(e.currentTarget.dataset.command, { market: true }));
 }
 $('btn-refresh').addEventListener('click', refresh);
 

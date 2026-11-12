@@ -90,9 +90,40 @@ h3 { margin: 0 0 10px; font-size: 16px; }
 .action-short { background: var(--red-dim); border-color: var(--red); }
 .action-flat  { background: #2b3138; border-color: #47505c; }
 
+/* --- spread slider and market buttons ----------------------------------- */
+.spread-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: -8px 0 18px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.spread-control label { font-weight: 600; white-space: nowrap; }
+.spread-control input[type=range] { flex: 1; min-width: 0; accent-color: var(--blue); }
+.spread-readout { font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 9em; }
+.spread-readout.spread-off-default { color: var(--amber); }
+
+.market-actions {
+  margin: 0 0 22px;
+  padding: 12px 14px 0;
+  border: 1px dashed var(--amber);
+  border-radius: var(--radius);
+}
+.market-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.market-head strong { color: var(--amber); letter-spacing: .06em; text-transform: uppercase; }
+.market-grid { margin: 12px 0 14px; }
+.action-market { padding: 16px 12px; }
+.action-market .action-title { font-size: 18px; }
+
 @media (max-width: 640px) {
   .actions { grid-template-columns: 1fr; }
   .action { padding: 24px 12px; }
+  .action-market { padding: 14px 12px; }
+  .spread-control { flex-wrap: wrap; }
+  .spread-control input[type=range] { flex-basis: 100%; order: 3; }
 }
 
 /* --- panels ------------------------------------------------------------ */

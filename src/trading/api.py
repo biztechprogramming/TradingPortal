@@ -13,7 +13,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -58,6 +58,17 @@ class CommandRequest(BaseModel):
     )
     force: bool = Field(
         False, description="Bypass the duplicate-command time window"
+    )
+    order_type: Literal["LIMIT", "MARKET"] = Field(
+        "LIMIT",
+        description=(
+            "LIMIT: repriced marketable limits (default). MARKET: market "
+            "orders, regular session only, always confirmed."
+        ),
+    )
+    spread_scale: float | None = Field(
+        None, gt=0, le=10,
+        description="Multiply the configured maximum spread for this command",
     )
 
 
@@ -272,6 +283,8 @@ def create_app(
                 confirm_token=payload.confirm_token,
                 force=payload.force,
                 source=source,
+                market=payload.order_type == "MARKET",
+                spread_scale=payload.spread_scale,
             )
         except ConfirmationRequired as exc:
             return JSONResponse(
@@ -282,6 +295,7 @@ def create_app(
                     "confirm_token": exc.token,
                     "expires_at": exc.expires_at,
                     "command": command.value,
+                    "order_type": payload.order_type,
                 },
             )
         except DuplicateCommand as exc:

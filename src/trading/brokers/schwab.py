@@ -569,6 +569,32 @@ class SchwabBroker(Broker):
             broker=self.name,
         )
 
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        body = build_market_order_payload(symbol, side, quantity)
+        resp = self._request(
+            "POST",
+            f"/trader/v1/accounts/{self._account_hash}/orders",
+            json_body=body,
+        )
+        order_id = _order_id_from_location(resp)
+        if not order_id:
+            raise OrderRejected(
+                "Schwab accepted the market order but returned no Location "
+                "header; the order id is unknown. Reconcile before retrying."
+            )
+        return Order(
+            order_id=order_id,
+            symbol=symbol.upper(),
+            side=side,
+            quantity=quantity,
+            limit_price=0.0,
+            state=OrderState.PENDING,
+            broker=self.name,
+            order_type="MARKET",
+        )
+
     def replace_order(self, order_id: str, limit_price: float) -> Order:
         """Schwab replaces atomically; the response carries a *new* order id.
 
@@ -806,6 +832,25 @@ def build_order_payload(
         "duration": "DAY",
         "orderStrategyType": "SINGLE",
         "price": f"{limit_price:.2f}",
+        "orderLegCollection": [
+            {
+                "instruction": "BUY" if side is Side.BUY else "SELL",
+                "quantity": int(quantity),
+                "instrument": {"symbol": symbol.upper(), "assetType": "EQUITY"},
+            }
+        ],
+    }
+
+
+def build_market_order_payload(
+    symbol: str, side: Side, quantity: int
+) -> dict[str, Any]:
+    """A single-leg equity day market order, regular session only."""
+    return {
+        "orderType": "MARKET",
+        "session": "NORMAL",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
         "orderLegCollection": [
             {
                 "instruction": "BUY" if side is Side.BUY else "SELL",

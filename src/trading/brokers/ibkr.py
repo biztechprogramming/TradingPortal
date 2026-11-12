@@ -764,6 +764,51 @@ class IBKRBroker(Broker):
             client_order_id=client_id,
         )
 
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        conid = self.resolve_conid(symbol)
+        client_id = f"qs{int(time.time() * 1000) % 10_000_000_000}"
+        payload = {
+            "orders": [
+                {
+                    "conid": conid,
+                    "orderType": "MKT",
+                    "side": side.value,
+                    "quantity": int(quantity),
+                    "tif": "DAY",
+                    "outsideRTH": False,
+                    "cOID": client_id,
+                }
+            ]
+        }
+        response = self._request(
+            "POST", f"/iserver/account/{self._acct_id}/orders", json_body=payload
+        )
+        result = self._resolve_replies(response)
+        order_id = _extract_order_id(result)
+        if not order_id:
+            raise OrderRejected(f"IBKR did not return an order id: {result!r}")
+        self._order_conids[str(order_id)] = conid
+        self._order_meta[str(order_id)] = {
+            "symbol": symbol.upper(),
+            "side": side,
+            "conid": conid,
+            "quantity": int(quantity),
+            "limit_price": 0.0,
+        }
+        return Order(
+            order_id=str(order_id),
+            symbol=symbol.upper(),
+            side=side,
+            quantity=int(quantity),
+            limit_price=0.0,
+            state=OrderState.PENDING,
+            broker=self.name,
+            client_order_id=client_id,
+            order_type="MARKET",
+        )
+
     def replace_order(self, order_id: str, limit_price: float) -> Order:
         meta = self._order_meta.get(str(order_id), {})
         current = self.get_order_status(order_id)

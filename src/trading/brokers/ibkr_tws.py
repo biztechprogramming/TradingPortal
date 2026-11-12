@@ -461,6 +461,21 @@ class IBKRTwsBroker(Broker):
         )
         return self._place(contract, order)
 
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        from ib_async import MarketOrder
+
+        contract = self._contract(symbol)
+        ref = f"qs{int(time.time() * 1000) % 10_000_000_000}"
+        order = MarketOrder(
+            side.value, int(quantity), tif="DAY", outsideRth=False,
+            account=self._acct_id, orderRef=ref,
+        )
+        result = self._place(contract, order)
+        result.order_type = "MARKET"
+        return result
+
     def replace_order(self, order_id: str, limit_price: float) -> Order:
         trade = self._find_trade(str(order_id))
         if trade is None:

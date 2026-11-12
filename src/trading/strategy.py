@@ -27,7 +27,7 @@ from .models import (
     exposure_from_positions,
 )
 from .sizing import calculate_quantity
-from .validation import check_market_hours
+from .validation import check_market_hours, check_regular_session
 
 log = logging.getLogger("trading.strategy")
 
@@ -44,8 +44,11 @@ class Strategy:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         quote_fallback: QuoteFallback | None = None,
+        market: bool = False,
     ) -> None:
         self.settings = settings
+        #: Use market orders instead of repriced marketable limits.
+        self.market = market
         self.audit = audit_log
         self.command_id = command_id
         self._sleep = sleep
@@ -62,6 +65,8 @@ class Strategy:
         )
         try:
             check_market_hours(self.settings)
+            if self.market:
+                check_regular_session(self.settings)
 
             if not broker.connected:
                 broker.connect()
@@ -237,15 +242,17 @@ class Strategy:
                     "violation if they were bought with unsettled cash"
                 )
 
-        fill = self.engine.execute_leg(
-            broker,
-            LegRequest(
-                symbol=symbol,
-                side=Side.SELL,
-                quantity=quantity,
-                position_quantity=position.quantity,
-            ),
+        req = LegRequest(
+            symbol=symbol,
+            side=Side.SELL,
+            quantity=quantity,
+            position_quantity=position.quantity,
         )
+        if self.market:
+            quote = self.engine.fresh_quote(broker, symbol)
+            fill = self.engine.execute_market_leg(broker, req, quote.bid)
+        else:
+            fill = self.engine.execute_leg(broker, req)
         result.fills.append(fill)
         return fill
 
@@ -286,7 +293,14 @@ class Strategy:
         from .pricing import compute_limit_price
 
         decision = compute_limit_price(quote, Side.BUY, self.settings)
-        sizing = calculate_quantity(balances, decision.limit_price, self.settings)
+        # A market buy has no price bound, so size it against the worst price
+        # the limit path would ever accept. That keeps a fast market from
+        # turning into a funds rejection.
+        price = (
+            quote.ask + self.settings.guard_distance_for(target, quote.ask)
+            if self.market else decision.limit_price
+        )
+        sizing = calculate_quantity(balances, price, self.settings)
         self.audit.record(
             A.SIZING,
             command_id=self.command_id,
@@ -295,6 +309,8 @@ class Strategy:
             sizing=sizing.to_dict(),
             price_decision=decision.to_dict(),
             existing_position=existing_qty,
+            order_type="MARKET" if self.market else "LIMIT",
+            sized_at=price,
         )
 
         if existing_qty > 0 and sizing.quantity < self.settings.min_order_shares:
@@ -313,7 +329,7 @@ class Strategy:
             result.errors.append(
                 f"insufficient funds: ${balances.cash_available:,.2f} available, "
                 f"${self.settings.cash_buffer_dollars:,.2f} buffer, "
-                f"{target} limit ${decision.limit_price:,.2f} -> "
+                f"{target} {'est.' if self.market else 'limit'} ${price:,.2f} -> "
                 f"{sizing.quantity} shares{why}"
             )
             return
@@ -325,17 +341,18 @@ class Strategy:
             )
 
         # 4. Buy, bounded by exactly the money we said we would spend.
-        budget = sizing.quantity * decision.limit_price
-        fill = self.engine.execute_leg(
-            broker,
-            LegRequest(
-                symbol=target,
-                side=Side.BUY,
-                quantity=sizing.quantity,
-                budget=budget,
-                balances=balances,
-            ),
+        budget = sizing.quantity * price
+        req = LegRequest(
+            symbol=target,
+            side=Side.BUY,
+            quantity=sizing.quantity,
+            budget=budget,
+            balances=balances,
         )
+        if self.market:
+            fill = self.engine.execute_market_leg(broker, req, price)
+        else:
+            fill = self.engine.execute_leg(broker, req)
         result.fills.append(fill)
 
     def _settled_balances(

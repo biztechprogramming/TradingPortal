@@ -280,6 +280,20 @@ class SimulatedBroker(Broker):
             self.submitted_orders.append(order)
             return order
 
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        """Submitted as a limit through the touch, then flagged as market."""
+        quote = self._quotes.get(symbol.upper())
+        if quote is None:
+            raise OrderRejected(f"{self.name}: no simulated quote for {symbol}")
+        # Sized at the touch for the cash check; marketability is guaranteed
+        # by the fill logic, which never holds back a market order.
+        price = quote.ask if side is Side.BUY else quote.bid
+        order = self.submit_limit_order(symbol, side, quantity, price)
+        order.order_type = "MARKET"
+        return order
+
     def replace_order(self, order_id: str, limit_price: float) -> Order:
         self._tick(mutating=True)
         with self._lock:
@@ -338,14 +352,17 @@ class SimulatedBroker(Broker):
 
         # Marketability: a buy fills only if it is priced at or above the
         # offer; a sell only if at or below the bid.
+        market = order.order_type == "MARKET"
         if order.side is Side.BUY:
-            if order.limit_price + 1e-9 < quote.ask:
+            if not market and order.limit_price + 1e-9 < quote.ask:
                 return
-            fill_price = order.limit_price if self.sim.fill_at_limit else quote.ask
+            fill_price = (order.limit_price if self.sim.fill_at_limit
+                          and not market else quote.ask)
         else:
-            if order.limit_price - 1e-9 > quote.bid:
+            if not market and order.limit_price - 1e-9 > quote.bid:
                 return
-            fill_price = order.limit_price if self.sim.fill_at_limit else quote.bid
+            fill_price = (order.limit_price if self.sim.fill_at_limit
+                          and not market else quote.bid)
 
         chunk = self.sim.fill_chunk or int(order.remaining_quantity)
         chunk = min(chunk, int(order.remaining_quantity))
@@ -511,6 +528,14 @@ class ShadowBroker(Broker):
     ) -> Order:
         self._prime()
         order = self._sim.submit_limit_order(symbol, side, quantity, limit_price)
+        order.simulated = True
+        return order
+
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        self._prime()
+        order = self._sim.submit_market_order(symbol, side, quantity)
         order.simulated = True
         return order
 

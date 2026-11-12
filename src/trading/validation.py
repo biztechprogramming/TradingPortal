@@ -105,6 +105,23 @@ def check_market_hours(settings: Settings, now: datetime | None = None) -> None:
         )
 
 
+def check_regular_session(settings: Settings, now: datetime | None = None) -> None:
+    """Market orders are allowed only in the regular 09:30-16:00 session.
+
+    Outside it the book is thin and a market order can fill far from the
+    last price, so unlike limits there is no override short of turning the
+    market-hours guard off entirely.
+    """
+    if not settings.market_hours_guard:
+        return
+    status = market_status(now)
+    if status.session != "regular":
+        raise MarketClosed(
+            f"Market orders are only allowed during regular hours "
+            f"(09:30-16:00 ET); now {status.reason}, {status.now_eastern}."
+        )
+
+
 def validate_order(
     *,
     symbol: str,

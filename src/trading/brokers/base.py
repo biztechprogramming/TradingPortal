@@ -99,6 +99,14 @@ class Broker(abc.ABC):
     ) -> Order:
         ...
 
+    def submit_market_order(
+        self, symbol: str, side: Side, quantity: int
+    ) -> Order:
+        """A regular-session day market order. Fills at whatever is there."""
+        from ..errors import OrderRejected
+
+        raise OrderRejected(f"{self.name}: market orders are not supported")
+
     @abc.abstractmethod
     def replace_order(self, order_id: str, limit_price: float) -> Order:
         """Cancel/replace at a new price, keeping the *unfilled* quantity.

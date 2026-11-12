@@ -21,7 +21,7 @@ failure aborts the whole command — no order is sent.
 | Not crossed | `bid > ask` | — |
 | Fresh | `now - quote_time > MAX_QUOTE_AGE_SECONDS` | default 2 s |
 | Clock sane | quote timestamp is >30 s in the future | — |
-| Tight enough | spread exceeds `MAX_SPREAD_TICKS` **or** `MAX_SPREAD_BPS` | QQQ 5 ticks, PSQ 10; 75 bps |
+| Tight enough | spread exceeds `MAX_SPREAD_TICKS` **or** `MAX_SPREAD_BPS` | QQQ 10 ticks, PSQ 10; 75 bps |
 
 Two design decisions worth calling out:
 
@@ -183,7 +183,7 @@ ragged tail; it is our replacements that stay whole, not the broker's fills.
 | Fills are slow | raise `BUY_OFFSET_TICKS` / `SELL_OFFSET_TICKS` to 2–3 |
 | Legs abort mid-move on QQQ | raise `MAX_SLIPPAGE_TICKS_QQQ` (25 = $0.25) |
 | Fills are worse than expected | lower `MAX_SLIPPAGE_TICKS_<SYM>` |
-| Aborts near the open/close | raise `MAX_SPREAD_TICKS_<SYM>`, or avoid the first/last minutes |
+| Aborts near the open/close | widen the dashboard spread slider, use an AT MARKET button, or raise `MAX_SPREAD_TICKS_<SYM>` |
 | `StaleQuoteError` in normal conditions | raise `MAX_QUOTE_AGE_SECONDS`; the broker's quote timestamps lag |
 | Too many cancel/replaces | raise `REPRICE_INTERVAL_SECONDS` or lower `MAX_REPRICE_ATTEMPTS` |
 | Illiquid symbol swapped in | lower `MAX_SPREAD_TICKS`, raise `ORDER_FILL_TIMEOUT_SECONDS` |

@@ -31,10 +31,20 @@
   </section>
 
   <section class="spread-control">
-    <label for="spread-slider">Max spread</label>
-    <input id="spread-slider" type="range" min="1" max="50" step="1" value="10">
-    <span id="spread-readout" class="spread-readout">10¢</span>
-    <button id="spread-reset" class="small" type="button">Default</button>
+    <div class="spread-title">
+      <strong>Max spread</strong>
+      <button id="spread-reset" class="small" type="button">Defaults</button>
+    </div>
+    <div class="spread-row">
+      <label for="spread-long" id="spread-long-label">QQQ</label>
+      <input id="spread-long" type="range" min="1" max="50" step="1" value="10">
+      <span id="spread-long-out" class="spread-readout">10¢</span>
+    </div>
+    <div class="spread-row">
+      <label for="spread-short" id="spread-short-label">PSQ</label>
+      <input id="spread-short" type="range" min="1" max="10" step="1" value="3">
+      <span id="spread-short-out" class="spread-readout">3¢</span>
+    </div>
   </section>
 
   <section id="market-actions" class="market-actions hidden">

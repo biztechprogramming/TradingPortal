@@ -66,9 +66,13 @@ class CommandRequest(BaseModel):
             "orders, regular session only, always confirmed."
         ),
     )
-    spread_scale: float | None = Field(
-        None, gt=0, le=10,
-        description="Multiply the configured maximum spread for this command",
+    max_spread_ticks: dict[str, float] | None = Field(
+        None,
+        description=(
+            "Per-symbol maximum spread in ticks for this command alone, "
+            'e.g. {"QQQ": 10, "PSQ": 2}. Symbols left out keep their '
+            "configured limit."
+        ),
     )
 
 
@@ -284,7 +288,7 @@ def create_app(
                 force=payload.force,
                 source=source,
                 market=payload.order_type == "MARKET",
-                spread_scale=payload.spread_scale,
+                max_spread_ticks=payload.max_spread_ticks,
             )
         except ConfirmationRequired as exc:
             return JSONResponse(

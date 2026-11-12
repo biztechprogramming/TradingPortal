@@ -799,14 +799,14 @@ class TradingService:
         force: bool = False,
         source: str = "api",
         market: bool = False,
-        spread_scale: float | None = None,
+        max_spread_ticks: dict[str, float] | None = None,
     ) -> CommandResult:
         """Run one command across every tradable account.
 
         ``market`` sends market orders instead of repriced limits; it always
         needs confirmation and only runs in the regular session.
-        ``spread_scale`` multiplies the configured maximum spread for this
-        command alone (the dashboard's spread slider).
+        ``max_spread_ticks`` overrides the maximum spread per symbol for this
+        command alone (the dashboard's spread sliders, one per symbol).
         """
         command_id = new_command_id()
         self.audit.record(
@@ -818,13 +818,13 @@ class TradingService:
             request_id=request_id,
             force=force,
             order_type="MARKET" if market else "LIMIT",
-            spread_scale=spread_scale,
+            max_spread_ticks=max_spread_ticks,
         )
 
         try:
             if market:
                 check_regular_session(self.settings)
-            settings = self._command_settings(market, spread_scale)
+            settings = self._command_settings(market, max_spread_ticks)
             self._preflight(command, request_id, confirm_token, force,
                             command_id, market=market)
         except TradingError as exc:
@@ -912,33 +912,36 @@ class TradingService:
                 command=command.value,
             )
 
-    #: Bounds on the dashboard's spread slider, as a multiple of the
-    #: configured maximum. Wide enough to be useful, not wide enough to
-    #: switch the check off by accident.
-    SPREAD_SCALE_MIN = 0.1
-    SPREAD_SCALE_MAX = 10.0
+    #: Bounds on a per-command spread override, in ticks. Each symbol has
+    #: its own: QQQ trades several cents wide at the open, PSQ a penny.
+    SPREAD_TICKS_MIN = 1.0
+    SPREAD_TICKS_MAX = 100.0
 
     def _command_settings(
-        self, market: bool, spread_scale: float | None
+        self, market: bool, max_spread_ticks: dict[str, float] | None
     ) -> Settings:
         """Settings for one command, with its spread overrides applied."""
         settings = self.settings
-        if spread_scale is not None and spread_scale != 1.0:
-            if not (self.SPREAD_SCALE_MIN <= spread_scale <= self.SPREAD_SCALE_MAX):
-                raise OrderValidationError(
-                    f"spread_scale {spread_scale:g} is outside "
-                    f"{self.SPREAD_SCALE_MIN:g}-{self.SPREAD_SCALE_MAX:g}"
-                )
-            settings = replace(
-                settings,
-                max_spread_ticks_by_symbol={
-                    sym: settings.max_spread_ticks_for(sym) * spread_scale
-                    for sym in settings.symbols
-                },
-                # The bps backstop widens with the slider too, or a wider
-                # setting would be silently capped on the cheaper symbol.
-                max_spread_bps=settings.max_spread_bps * max(1.0, spread_scale),
-            )
+        if max_spread_ticks:
+            traded = {s.upper() for s in settings.symbols}
+            limits = {
+                sym: settings.max_spread_ticks_for(sym) for sym in settings.symbols
+            }
+            for raw_sym, ticks in max_spread_ticks.items():
+                sym = str(raw_sym).upper().strip()
+                if sym not in traded:
+                    raise OrderValidationError(
+                        f"max_spread_ticks names {raw_sym!r}, which is not "
+                        f"traded; only {sorted(traded)}"
+                    )
+                if not (self.SPREAD_TICKS_MIN <= float(ticks) <= self.SPREAD_TICKS_MAX):
+                    raise OrderValidationError(
+                        f"max spread for {sym} must be "
+                        f"{self.SPREAD_TICKS_MIN:g}-{self.SPREAD_TICKS_MAX:g} "
+                        f"ticks, got {ticks:g}"
+                    )
+                limits[sym] = float(ticks)
+            settings = replace(settings, max_spread_ticks_by_symbol=limits)
         if market:
             # A market order is placed to get in now, so the tick limit on
             # the spread does not apply; the bps backstop still does, so a

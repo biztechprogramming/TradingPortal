@@ -1444,45 +1444,53 @@ async function refresh() {
 
 // --- commands ---------------------------------------------------------------
 
-// --- spread slider ----------------------------------------------------------
-// The slider is in ticks of the long symbol's maximum spread. It is sent as a
-// multiple of the configured limit, so the short symbol scales with it. The
-// chosen value is kept per browser; the server default is the configured one.
+// --- spread sliders ---------------------------------------------------------
+// One slider per symbol, each in ticks of that symbol's own maximum spread:
+// QQQ runs several cents wide at the open while PSQ is a penny wide, so they
+// are never tied together. Each value is kept per browser; the defaults are
+// the server's configured limits.
 
-const SPREAD_KEY = 'spread_ticks';
-let spreadDefaultTicks = null;   // long symbol's configured limit, in ticks
-let spreadShortTicks = null;     // short symbol's configured limit, in ticks
+const SPREAD_MAX_TICKS = { long: 50, short: 10 };
+const spreadDefaults = { long: null, short: null };
 let spreadTickSize = 0.01;
 
-function storedSpread() {
-  try { return Number(localStorage.getItem(SPREAD_KEY)) || null; } catch { return null; }
+const spreadSym = (which) => (which === 'long' ? longSymbol : shortSymbol);
+const spreadKey = (which) => `spread_ticks_${spreadSym(which)}`;
+
+function storedSpread(which) {
+  try { return Number(localStorage.getItem(spreadKey(which))) || null; } catch { return null; }
 }
-function storeSpread(ticks) {
+function storeSpread(which, ticks) {
   try {
-    if (ticks === null) localStorage.removeItem(SPREAD_KEY);
-    else localStorage.setItem(SPREAD_KEY, String(ticks));
+    if (ticks === null) localStorage.removeItem(spreadKey(which));
+    else localStorage.setItem(spreadKey(which), String(ticks));
   } catch { /* storage unavailable: the slider still works for this page */ }
 }
 
 function renderSpreadControl(cfg) {
-  const def = cfg.max_spread_ticks?.[longSymbol];
-  if (!def) return;
-  const first = spreadDefaultTicks === null;
-  spreadDefaultTicks = def;
-  spreadShortTicks = cfg.max_spread_ticks?.[shortSymbol] ?? def;
   spreadTickSize = cfg.tick_size || 0.01;
-  const slider = $('spread-slider');
-  // The server accepts 0.1x-10x of the configured limit.
-  slider.min = String(Math.max(1, Math.ceil(def * 0.1)));
-  slider.max = String(Math.min(50, Math.floor(def * 10)));
-  if (first) slider.value = String(storedSpread() ?? def);
+  for (const which of ['long', 'short']) {
+    const def = cfg.max_spread_ticks?.[spreadSym(which)];
+    if (!def) continue;
+    const first = spreadDefaults[which] === null;
+    spreadDefaults[which] = def;
+    $(`spread-${which}-label`).textContent = spreadSym(which);
+    const slider = $(`spread-${which}`);
+    slider.max = String(Math.max(SPREAD_MAX_TICKS[which], def));
+    if (first) slider.value = String(storedSpread(which) ?? def);
+  }
   updateSpreadReadout();
 }
 
-function spreadScale() {
-  if (!spreadDefaultTicks) return null;
-  const scale = Number($('spread-slider').value) / spreadDefaultTicks;
-  return Math.abs(scale - 1) < 1e-9 ? null : Number(scale.toFixed(4));
+/** Per-symbol overrides to send, or null when every slider is at default. */
+function spreadOverrides() {
+  const out = {};
+  for (const which of ['long', 'short']) {
+    const def = spreadDefaults[which];
+    const ticks = Number($(`spread-${which}`).value);
+    if (def && ticks !== def) out[spreadSym(which)] = ticks;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function fmtSpread(ticks) {
@@ -1491,26 +1499,33 @@ function fmtSpread(ticks) {
 }
 
 function updateSpreadReadout() {
-  if (!spreadDefaultTicks) return;
-  const ticks = Number($('spread-slider').value);
-  const scale = ticks / spreadDefaultTicks;
-  const isDefault = Math.abs(scale - 1) < 1e-9;
-  const out = $('spread-readout');
-  out.textContent = `${longSymbol} ${fmtSpread(ticks)} · ${shortSymbol} `
-    + `${fmtSpread(spreadShortTicks * scale)}${isDefault ? ' (default)' : ''}`;
-  out.classList.toggle('spread-off-default', !isDefault);
-  $('spread-reset').disabled = isDefault || busy;
+  let allDefault = true;
+  for (const which of ['long', 'short']) {
+    const def = spreadDefaults[which];
+    if (!def) continue;
+    const ticks = Number($(`spread-${which}`).value);
+    const isDefault = ticks === def;
+    allDefault = allDefault && isDefault;
+    const out = $(`spread-${which}-out`);
+    out.textContent = `${fmtSpread(ticks)}${isDefault ? ' (default)' : ''}`;
+    out.classList.toggle('spread-off-default', !isDefault);
+  }
+  $('spread-reset').disabled = allDefault || busy;
 }
 
-$('spread-slider').addEventListener('input', () => {
-  const ticks = Number($('spread-slider').value);
-  storeSpread(ticks === spreadDefaultTicks ? null : ticks);
-  updateSpreadReadout();
-});
+for (const which of ['long', 'short']) {
+  $(`spread-${which}`).addEventListener('input', () => {
+    const ticks = Number($(`spread-${which}`).value);
+    storeSpread(which, ticks === spreadDefaults[which] ? null : ticks);
+    updateSpreadReadout();
+  });
+}
 $('spread-reset').addEventListener('click', () => {
-  if (!spreadDefaultTicks) return;
-  $('spread-slider').value = String(spreadDefaultTicks);
-  storeSpread(null);
+  for (const which of ['long', 'short']) {
+    if (!spreadDefaults[which]) continue;
+    $(`spread-${which}`).value = String(spreadDefaults[which]);
+    storeSpread(which, null);
+  }
   updateSpreadReadout();
 });
 
@@ -1569,8 +1584,8 @@ async function sendCommand(command, { market = false } = {}) {
   const body = { command, request_id: requestId };
   if (market) body.order_type = 'MARKET';
   else {
-    const scale = spreadScale();
-    if (scale !== null) body.spread_scale = scale;
+    const spreads = spreadOverrides();
+    if (spreads) body.max_spread_ticks = spreads;
   }
   setBusy(true);
   try {

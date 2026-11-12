@@ -403,7 +403,7 @@ one. The ones that matter most:
 | `BUY_OFFSET_TICKS` / `SELL_OFFSET_TICKS` | `1` | Working offset through the touch, in ticks |
 | `SPREAD_MULTIPLE` | `1.0` | Widen the offset with the spread on a thin book |
 | `MAX_SLIPPAGE_TICKS_<SYM>` | QQQ `25`, PSQ `10` | **Hard guard** — abort rather than chase |
-| `MAX_SPREAD_TICKS_<SYM>` | QQQ `10`, PSQ `10` | Refuse to trade a wide book (dashboard slider scales it per command) |
+| `MAX_SPREAD_TICKS_<SYM>` | QQQ `10`, PSQ `3` | Refuse to trade a wide book (a dashboard slider per symbol overrides it per command) |
 | `MAX_QUOTE_AGE_SECONDS` | `2` | Refuse stale quotes |
 | `ORDER_FILL_TIMEOUT_SECONDS` | `90` | Cancel and report after this |
 | `MAX_REPRICE_ATTEMPTS` | `5` | Cap on cancel/replace cycles |

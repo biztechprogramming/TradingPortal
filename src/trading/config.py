@@ -32,11 +32,12 @@ FALLBACK_LADDER_STEP = 0.01
 DEFAULT_MAX_SLIPPAGE_TICKS: dict[str, float] = {"QQQ": 25.0, "PSQ": 10.0}
 FALLBACK_MAX_SLIPPAGE_TICKS = 25.0
 
-#: Widest spread, in ticks, we will price an order against. QQQ is penny-wide
-#: most of the session but runs 5-10 cents in the first minutes after the
-#: open, so a dime is the default. Override with ``MAX_SPREAD_TICKS_<SYMBOL>``,
-#: or per command with the dashboard's spread slider.
-DEFAULT_MAX_SPREAD_TICKS: dict[str, float] = {"QQQ": 10.0, "PSQ": 10.0}
+#: Widest spread, in ticks, we will price an order against. Each symbol has
+#: its own: QQQ is penny-wide most of the session but runs 5-10 cents in the
+#: minutes after the open, so a dime; PSQ is a penny wide essentially always,
+#: so three cents is already a dislocation. Override with
+#: ``MAX_SPREAD_TICKS_<SYMBOL>``, or per command with the dashboard sliders.
+DEFAULT_MAX_SPREAD_TICKS: dict[str, float] = {"QQQ": 10.0, "PSQ": 3.0}
 FALLBACK_MAX_SPREAD_TICKS = 10.0
 
 #: Substrings that mark an environment variable as secret. Used by the

@@ -92,18 +92,19 @@ h3 { margin: 0 0 10px; font-size: 16px; }
 
 /* --- spread slider and market buttons ----------------------------------- */
 .spread-control {
-  display: flex;
-  align-items: center;
-  gap: 12px;
   margin: -8px 0 18px;
   padding: 10px 14px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  display: grid;
+  gap: 6px;
 }
-.spread-control label { font-weight: 600; white-space: nowrap; }
-.spread-control input[type=range] { flex: 1; min-width: 0; accent-color: var(--blue); }
-.spread-readout { font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 9em; }
+.spread-title { display: flex; justify-content: space-between; align-items: center; }
+.spread-row { display: flex; align-items: center; gap: 12px; }
+.spread-row label { font-weight: 600; width: 3.5em; }
+.spread-row input[type=range] { flex: 1; min-width: 0; accent-color: var(--blue); }
+.spread-readout { font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 7.5em; text-align: right; }
 .spread-readout.spread-off-default { color: var(--amber); }
 
 .market-actions {
@@ -122,8 +123,6 @@ h3 { margin: 0 0 10px; font-size: 16px; }
   .actions { grid-template-columns: 1fr; }
   .action { padding: 24px 12px; }
   .action-market { padding: 14px 12px; }
-  .spread-control { flex-wrap: wrap; }
-  .spread-control input[type=range] { flex-basis: 100%; order: 3; }
 }
 
 /* --- panels ------------------------------------------------------------ */

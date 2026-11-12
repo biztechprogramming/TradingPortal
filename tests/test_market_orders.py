@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from trading.audit import AuditLog
+from trading.config import DEFAULT_MAX_SPREAD_TICKS
 from trading.errors import ConfirmationRequired, MarketClosed, OrderValidationError
 from trading.models import Command, Exposure
 from trading.orchestrator import TradingService
@@ -140,23 +141,42 @@ def test_wide_spread_blocks_a_limit_command(tmp_path):
     assert "WideSpreadError" in result.results[0].errors[0]
 
 
-def test_spread_scale_widens_the_limit_for_one_command(tmp_path):
+def test_qqq_spread_widens_for_one_command(tmp_path):
     service = wide_service(tmp_path, 0.15)
-    assert service.execute(Command.GO_LONG, spread_scale=2.0).status == "OK"
+    result = service.execute(Command.GO_LONG, max_spread_ticks={"QQQ": 20})
+    assert result.status == "OK"
     # The configured limit itself is untouched.
     assert service.settings.max_spread_ticks_for("QQQ") == 10
 
 
-def test_spread_scale_can_narrow_the_limit(tmp_path):
+def test_qqq_spread_can_narrow(tmp_path):
     result = wide_service(tmp_path, 0.04).execute(
-        Command.GO_LONG, spread_scale=0.3)
+        Command.GO_LONG, max_spread_ticks={"QQQ": 3})
     assert result.status == "FAILED"
     assert "WideSpreadError" in result.results[0].errors[0]
 
 
-def test_spread_scale_out_of_range_is_rejected(service):
+def test_symbols_have_independent_spread_limits(tmp_path):
+    # Widening QQQ does nothing for a PSQ that is 5 cents wide.
+    settings = make_settings(
+        tmp_path, max_spread_ticks_by_symbol=dict(DEFAULT_MAX_SPREAD_TICKS))
+    broker = make_broker(settings, "sim", cash=10_000,
+                         psq_bid=32.10, psq_ask=32.15)
+    service = TradingService(settings, brokers={"sim": broker})
+    assert service.execute(
+        Command.GO_SHORT, max_spread_ticks={"QQQ": 50}).status == "FAILED"
+    assert service.execute(
+        Command.GO_SHORT, max_spread_ticks={"PSQ": 5}).status == "OK"
+
+
+def test_psq_default_is_tighter_than_qqq():
+    assert DEFAULT_MAX_SPREAD_TICKS == {"QQQ": 10.0, "PSQ": 3.0}
+
+
+@pytest.mark.parametrize("override", [{"QQQ": 500}, {"QQQ": 0}, {"SPY": 5}])
+def test_bad_spread_override_is_rejected(service, override):
     with pytest.raises(OrderValidationError):
-        service.execute(Command.GO_LONG, spread_scale=50)
+        service.execute(Command.GO_LONG, max_spread_ticks=override)
 
 
 def test_market_order_ignores_the_tick_spread_limit(tmp_path):
@@ -203,9 +223,9 @@ def test_api_market_order_round_trip(client):
     assert second.json()["order_type"] == "MARKET"
 
 
-def test_api_spread_scale(client):
+def test_api_per_symbol_spread(client):
     resp = client.post("/api/command", headers=AUTH, json={
-        "command": "GO_LONG", "spread_scale": 2})
+        "command": "GO_LONG", "max_spread_ticks": {"QQQ": 20, "PSQ": 2}})
     assert resp.status_code == 200, resp.json()
 
 

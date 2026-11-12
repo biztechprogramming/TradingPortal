@@ -437,6 +437,18 @@ def create_app(
         )
         return JSONResponse(status_code=http_status, content=body)
 
+    @app.post("/api/cancel-orders", dependencies=[Auth])
+    def cancel_orders() -> JSONResponse:
+        """Cancel every working QQQ/PSQ order in every tradable account."""
+        try:
+            body = service.cancel_working_orders(source="dashboard")
+        except ExecutionLocked as exc:
+            return JSONResponse(
+                status_code=423, content={"status": "LOCKED", "detail": str(exc)}
+            )
+        code = {"OK": 200, "PARTIAL": 207}.get(body["status"], 502)
+        return JSONResponse(status_code=code, content=body)
+
     @app.post("/api/acknowledge", dependencies=[Auth])
     def acknowledge(payload: AcknowledgeRequest) -> dict[str, Any]:
         cleared = service.acknowledge_mismatch(payload.note)

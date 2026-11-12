@@ -788,6 +788,87 @@ class TradingService:
             A.CONFIRMATION_ACCEPTED, command_id=command_id, command=key
         )
 
+    # --- cancel working orders -------------------------------------------
+
+    def cancel_working_orders(self, source: str = "api") -> dict[str, Any]:
+        """Cancel every working QQQ/PSQ order in every tradable account.
+
+        Positions are untouched. Takes the execution lock so it cannot pull
+        an order out from under a running command; that case reports LOCKED.
+        Each account is handled independently, and each cancel is confirmed.
+        """
+        command_id = new_command_id()
+        symbols = set(self.settings.symbols)
+        self.audit.record(
+            A.COMMAND_RECEIVED, command_id=command_id,
+            command="CANCEL_ORDERS", source=source,
+        )
+
+        def cancel_one(broker: Broker) -> dict[str, Any]:
+            entry: dict[str, Any] = {"cancelled": [], "errors": []}
+            try:
+                if not broker.connected:
+                    broker.connect()
+                orders = broker.get_open_orders_for(symbols)
+            except Exception as exc:
+                entry["errors"].append(f"could not list orders: {exc}")
+                return entry
+            for order in orders:
+                try:
+                    broker.cancel_order(order.order_id)
+                    final = broker.wait_until_cancelled(
+                        order.order_id,
+                        self.settings.cancel_confirm_timeout_seconds,
+                    )
+                except Exception as exc:
+                    entry["errors"].append(
+                        f"{order.symbol} {order.side.value} {order.order_id}: {exc}"
+                    )
+                    continue
+                if not final.state.is_terminal:
+                    entry["errors"].append(
+                        f"{order.symbol} {order.side.value} {order.order_id}: "
+                        "cancel not confirmed; it may still be working"
+                    )
+                    continue
+                entry["cancelled"].append({
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "quantity": order.quantity,
+                    "filled_quantity": final.filled_quantity,
+                    "state": final.state.value,
+                })
+                self.audit.record(
+                    A.ORDER_CANCELLED, command_id=command_id,
+                    broker=broker.name, order_id=order.order_id,
+                    symbol=order.symbol, reason="cancel-orders button",
+                    order=final.to_dict(),
+                )
+            return entry
+
+        with self.lock.acquire(owner=f"{source}:CANCEL_ORDERS:{command_id}"):
+            targets = self.tradable_brokers
+            results: dict[str, Any] = {}
+            if targets:
+                with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+                    futures = {n: pool.submit(cancel_one, b) for n, b in targets.items()}
+                    results = {n: f.result() for n, f in futures.items()}
+
+        cancelled = sum(len(r["cancelled"]) for r in results.values())
+        failed = sum(len(r["errors"]) for r in results.values())
+        status = "FAILED" if failed and not cancelled else "PARTIAL" if failed else "OK"
+        self.audit.record(
+            A.COMMAND_FINISHED, command_id=command_id, command="CANCEL_ORDERS",
+            status=status, cancelled=cancelled, errors=failed,
+        )
+        return {
+            "command_id": command_id,
+            "status": status,
+            "cancelled": cancelled,
+            "results": results,
+        }
+
     # --- command execution ------------------------------------------------
 
     def execute(

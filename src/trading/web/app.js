@@ -1404,6 +1404,7 @@ async function refresh() {
     renderBanner(s);
     renderCombined(s.combined || {});
     renderSpreadControl(s.config || {});
+    renderCancelButton(s);
     // Market-order buttons exist only while the regular session is running;
     // the server refuses them outside it regardless.
     $('market-actions').classList.toggle('hidden', s.market?.session !== 'regular');
@@ -1529,6 +1530,54 @@ $('spread-reset').addEventListener('click', () => {
   updateSpreadReadout();
 });
 
+// --- cancel working orders ---------------------------------------------------
+
+let workingOrderCount = 0;
+
+/** Working QQQ/PSQ orders in tradable accounts: exactly what the button cancels. */
+function renderCancelButton(status) {
+  const syms = new Set([longSymbol, shortSymbol]);
+  const orders = Object.values(status.brokers || {})
+    .filter((b) => !b.read_only)
+    .flatMap((b) => b.open_orders || [])
+    .filter((o) => syms.has(o.symbol)
+      && ['PENDING', 'WORKING', 'PARTIALLY_FILLED'].includes(o.state));
+  workingOrderCount = orders.length;
+  $('btn-cancel-orders').disabled = busy || workingOrderCount === 0;
+  $('btn-cancel-orders').textContent = workingOrderCount
+    ? `Cancel ${workingOrderCount} working order${workingOrderCount === 1 ? '' : 's'}`
+    : 'Cancel working orders';
+  $('cancel-orders-note').textContent = workingOrderCount
+    ? orders.map((o) => `${o.side} ${fmtNum(o.quantity)} ${o.symbol}`).join(' · ')
+    : 'no working orders';
+}
+
+async function cancelWorkingOrders() {
+  if (busy || !workingOrderCount) return;
+  setBusy(true);
+  try {
+    const res = await api('/api/cancel-orders', { method: 'POST' });
+    const b = res.body || {};
+    const errors = Object.entries(b.results || {})
+      .flatMap(([name, r]) => (r.errors || []).map((e) => `${name}: ${e}`));
+    if (b.status === 'OK') {
+      toast(`Cancelled ${b.cancelled} working order${b.cancelled === 1 ? '' : 's'}.`);
+    } else if (b.status === 'LOCKED') {
+      toast(`Not cancelled: a command is running. ${b.detail || ''}`, { error: true, ms: 10000 });
+    } else {
+      toast(`Cancelled ${b.cancelled || 0}; failed: ${errors.join('; ') || b.detail || res.status}`,
+        { error: true, ms: 15000 });
+    }
+  } catch (err) {
+    toast(String(err), { error: true });
+  } finally {
+    setBusy(false);
+    refresh();
+  }
+}
+
+$('btn-cancel-orders').addEventListener('click', cancelWorkingOrders);
+
 const COMMAND_BUTTONS = [
   'btn-long', 'btn-short', 'btn-flat', 'btn-mkt-long', 'btn-mkt-short', 'btn-mkt-flat',
 ];
@@ -1536,6 +1585,7 @@ const COMMAND_BUTTONS = [
 function setBusy(state) {
   busy = state;
   for (const id of COMMAND_BUTTONS) $(id).disabled = state;
+  $('btn-cancel-orders').disabled = state || workingOrderCount === 0;
   for (const btn of document.querySelectorAll(
     '.rung, .buy-btn, .buy-now-btn, .step-btn, .reset-btn')) {
     btn.disabled = state || (btn.classList.contains('buy-now-btn')

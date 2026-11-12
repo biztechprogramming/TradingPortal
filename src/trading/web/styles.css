@@ -90,6 +90,10 @@ h3 { margin: 0 0 10px; font-size: 16px; }
 .action-short { background: var(--red-dim); border-color: var(--red); }
 .action-flat  { background: #2b3138; border-color: #47505c; }
 
+/* --- cancel working orders ---------------------------------------------- */
+.cancel-row { display: flex; align-items: center; gap: 12px; margin: -8px 0 18px; }
+.cancel-row button { padding: 8px 16px; }
+
 /* --- spread slider and market buttons ----------------------------------- */
 .spread-control {
   margin: -8px 0 18px;

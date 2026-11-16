@@ -42,8 +42,9 @@ def test_flat_to_short(settings, tmp_path):
 
     assert result.ok, result.errors
     assert result.exposure_after is Exposure.SHORT
-    # Keep one share of cash back: (10000 - 32.14) / 32.14 = 310 shares.
-    assert broker.get_position("PSQ").quantity == 310
+    # 98% of 10000 / 32.14 = 304 shares -> 300, which lands inside the
+    # 95-98% band because a PSQ lot is small relative to the account.
+    assert broker.get_position("PSQ").quantity == 300
     assert broker.get_position("QQQ") is None
 
 

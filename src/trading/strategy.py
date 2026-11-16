@@ -300,7 +300,7 @@ class Strategy:
             quote.ask + self.settings.guard_distance_for(target, quote.ask)
             if self.market else decision.limit_price
         )
-        sizing = calculate_quantity(balances, price, self.settings)
+        sizing = calculate_quantity(balances, price, self.settings, target)
         self.audit.record(
             A.SIZING,
             command_id=self.command_id,

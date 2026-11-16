@@ -485,7 +485,7 @@ class LadderExecutor:
         result: RungOrderResult,
     ) -> None:
         """No order working: size against the account and submit one."""
-        sizing = calculate_quantity(balances, price, self.settings)
+        sizing = calculate_quantity(balances, price, self.settings, symbol)
         self._log(
             A.SIZING, broker.name, symbol=symbol,
             sizing=sizing.to_dict(), limit_price=price,
@@ -671,4 +671,4 @@ class LadderExecutor:
         if price <= 0:
             return 0
         budget = self._budget_balances(order, balances)
-        return calculate_quantity(budget, price, self.settings).quantity
+        return calculate_quantity(budget, price, self.settings, order.symbol).quantity

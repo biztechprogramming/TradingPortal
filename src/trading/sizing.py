@@ -96,22 +96,15 @@ def calculate_quantity(
         raise InsufficientFunds("cannot size an order against a non-positive price")
 
     caps: list[str] = []
-    lot = max(1, settings.share_lot_size)
     available = spendable_cash(balances, settings)
 
-    # Two ceilings: the hard one that keeps the buffer intact, and the target
-    # one that deliberately leaves headroom. The tighter binds.
-    # The hard ceiling also keeps one share's worth of cash unspent.
+    # Leave between one and two shares' worth of cash, whatever the account
+    # size: reserve one share (or the buffer, if larger) and buy every whole
+    # share the rest covers. The remainder is under one more share, so the
+    # cash left is at least one share and less than two.
     one_share = limit_price + settings.estimated_fee_per_share
-    hard_ceiling = (
-        available - settings.cash_buffer_dollars - settings.estimated_fee_fixed - one_share
-    )
-    target_ceiling = (
-        available * settings.target_cash_max_pct / 100.0 - settings.estimated_fee_fixed
-    )
-    usable = min(hard_ceiling, target_ceiling)
-    if target_ceiling < hard_ceiling:
-        caps.append(f"TARGET_CASH_MAX_PCT={settings.target_cash_max_pct:g}")
+    reserve = max(one_share, settings.cash_buffer_dollars)
+    usable = available - settings.estimated_fee_fixed - reserve
 
     if settings.max_order_notional_dollars > 0 and usable > settings.max_order_notional_dollars:
         usable = settings.max_order_notional_dollars
@@ -130,39 +123,24 @@ def calculate_quantity(
             buying_power=balances.buying_power,
             buffer_applied=settings.cash_buffer_dollars,
             margin_allowed=settings.allow_margin,
-            caps_applied=caps + ["no usable cash after buffer"],
-            lot_size=lot,
+            caps_applied=caps + ["no usable cash after one-share reserve"],
+            lot_size=1,
         )
 
-    per_share_cost = limit_price + settings.estimated_fee_per_share
-    raw_quantity = int(math.floor(usable / per_share_cost))
+    per_share_cost = one_share
+    quantity = max(0, int(math.floor(usable / per_share_cost)))
 
-    if settings.max_shares_per_order > 0 and raw_quantity > settings.max_shares_per_order:
-        raw_quantity = settings.max_shares_per_order
+    if settings.max_shares_per_order > 0 and quantity > settings.max_shares_per_order:
+        quantity = settings.max_shares_per_order
         caps.append(f"MAX_SHARES_PER_ORDER={settings.max_shares_per_order}")
-
-    raw_quantity = max(0, raw_quantity)
-    quantity = (raw_quantity // lot) * lot
-    if lot > 1 and quantity != raw_quantity:
-        lot_pct = quantity * per_share_cost / available * 100.0 if available > 0 else 0.0
-        if lot_pct >= settings.target_cash_min_pct:
-            caps.append(f"SHARE_LOT_SIZE={lot} (from {raw_quantity} shares)")
-        else:
-            # Whole lots would fall short of the band; single shares get
-            # the account invested instead.
-            caps.append(
-                f"SHARE_LOT_SIZE={lot} skipped: {quantity} shares is only "
-                f"{lot_pct:.1f}% deployed, sizing in single shares"
-            )
-            quantity = raw_quantity
-            lot = 1
+    lot = 1
 
     fees = settings.estimated_fee_fixed + quantity * settings.estimated_fee_per_share
     estimated_cost = quantity * limit_price + fees
 
     # Defensive: floating-point division can round the last share up. Step by
     # the lot in use so a lotted order stays divisible.
-    while quantity > 0 and estimated_cost > available - settings.cash_buffer_dollars - one_share:
+    while quantity > 0 and estimated_cost > available - reserve:
         quantity -= lot
         quantity = max(0, quantity)
         fees = settings.estimated_fee_fixed + quantity * settings.estimated_fee_per_share
@@ -171,13 +149,6 @@ def calculate_quantity(
             caps.append("float-safety decrement")
 
     deployed_pct = (estimated_cost / available * 100.0) if available > 0 else 0.0
-    if quantity > 0 and deployed_pct < settings.target_cash_min_pct:
-        # Not an error: in a small account the one-share reserve and buffer
-        # are a large slice of cash, so this is the closest reachable size.
-        caps.append(
-            f"below TARGET_CASH_MIN_PCT={settings.target_cash_min_pct:g} "
-            f"({deployed_pct:.1f}% deployed) against ${available:,.2f} available"
-        )
 
     return SizingDecision(
         quantity=quantity,

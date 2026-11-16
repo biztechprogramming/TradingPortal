@@ -18,38 +18,28 @@ def bal(cash=10_000.0, bp=None, settled=None) -> Balances:
     )
 
 
-def test_deploys_the_target_band_in_whole_lots(tmp_path):
-    """The intended shape: divisible by 10 and inside 95-98% of cash."""
+def test_cash_left_is_between_one_and_two_shares(tmp_path):
+    """The rule for every account, small or large: 1 share <= cash left < 2."""
     s = make_settings(tmp_path, cash_buffer_dollars=25.0)
-    d = calculate_quantity(bal(1_000_000.0), 100.00, s)
-    assert d.quantity == 9_800
-    assert d.quantity % 10 == 0
-    assert 95.0 <= d.deployed_pct <= 98.0
-    assert d.estimated_cost <= 1_000_000.0 - 25.0
-
-
-def test_never_deploys_more_than_the_target_ceiling(tmp_path):
-    s = make_settings(tmp_path, cash_buffer_dollars=0)
-    for cash in (12_345.0, 250_000.0, 1_000_000.0):
-        for price in (32.11, 100.0, 500.08):
+    for cash in (1_500.0, 5_000.0, 12_345.0, 30_000.0, 152_784.0, 1_000_000.0):
+        for price in (32.11, 100.0, 500.08, 662.15):
             d = calculate_quantity(bal(cash), price, s)
-            assert d.deployed_pct <= 98.0 + 1e-9, (cash, price)
-            if d.lot_size == 10:
-                assert d.quantity % 10 == 0, (cash, price)
+            left = cash - d.estimated_cost
+            assert price <= left < 2 * price, (cash, price, left)
 
 
-def test_lots_that_miss_the_band_fall_back_to_single_shares(tmp_path):
-    """A lot worth more than the band is wide would under-invest the account.
-
-    $10k at $100 a share allows 98 shares at the ceiling, but the nearest
-    whole lot is 90 (90%). Single shares are used instead, and the switch is
-    recorded.
-    """
+def test_large_account_is_not_held_back_by_lots_or_percent(tmp_path):
+    """$152,784 at $662.15 used to leave ~$7k (98% cap, 10-share lots)."""
     s = make_settings(tmp_path, cash_buffer_dollars=25.0)
-    d = calculate_quantity(bal(10_000.0), 100.00, s)
-    assert d.quantity == 98
-    assert d.lot_size == 1
-    assert any("SHARE_LOT_SIZE=10 skipped" in c for c in d.caps_applied)
+    d = calculate_quantity(bal(152_784.0), 662.15, s)
+    assert d.quantity == 229
+    assert 662.15 <= 152_784.0 - d.estimated_cost < 2 * 662.15
+
+
+def test_buffer_larger_than_a_share_is_the_reserve(tmp_path):
+    s = make_settings(tmp_path, cash_buffer_dollars=600.0)
+    assert calculate_quantity(bal(1_000.0), 500.00, s).quantity == 0
+    assert calculate_quantity(bal(1_700.0), 500.00, s).quantity == 2
 
 
 def test_small_account_buys_single_shares_of_an_expensive_symbol(tmp_path):
@@ -60,30 +50,6 @@ def test_small_account_buys_single_shares_of_an_expensive_symbol(tmp_path):
     assert calculate_quantity(bal(6_000.0), 500.08, s).quantity == 10
 
 
-def test_one_share_of_cash_is_always_left(tmp_path):
-    s = make_settings(tmp_path, cash_buffer_dollars=25.0, target_cash_max_pct=100.0)
-    for cash in (1_000.0, 5_000.0, 12_345.0, 30_000.0, 1_000_000.0):
-        for price in (32.11, 100.0, 500.08, 612.40):
-            d = calculate_quantity(bal(cash), price, s)
-            assert cash - d.estimated_cost >= price + 25.0 - 1e-9, (cash, price)
-
-
-def test_large_account_keeps_whole_lots(tmp_path):
-    s = make_settings(tmp_path, cash_buffer_dollars=25.0)
-    d = calculate_quantity(bal(500_000.0), 612.40, s)
-    assert d.lot_size == 10
-    assert d.quantity % 10 == 0
-    assert d.deployed_pct >= 95.0
-
-
-def test_lot_size_one_restores_share_level_sizing(tmp_path):
-    s = make_settings(tmp_path, cash_buffer_dollars=25.0, share_lot_size=1,
-                      target_cash_max_pct=100.0)
-    d = calculate_quantity(bal(10_000.0), 100.00, s)
-    assert d.quantity == 98                     # (10000 - 25 - 100) / 100
-    assert d.estimated_cost == 9_800.00
-
-
 def test_estimated_cost_never_exceeds_available_funds(tmp_path):
     """The invariant that makes an insufficient-funds rejection impossible."""
     s = make_settings(tmp_path, cash_buffer_dollars=25.0)
@@ -92,15 +58,6 @@ def test_estimated_cost_never_exceeds_available_funds(tmp_path):
             d = calculate_quantity(bal(cash), price, s)
             assert d.estimated_cost <= cash - 25.0 + 1e-9, (cash, price)
             assert d.quantity == int(d.quantity) and d.quantity >= 0
-
-
-def test_buffer_is_respected(tmp_path):
-    s = make_settings(tmp_path, cash_buffer_dollars=600.0, share_lot_size=1,
-                      target_cash_max_pct=100.0)
-    d = calculate_quantity(bal(1_000.0), 500.00, s)
-    assert d.quantity == 0                      # only $400 usable
-    d2 = calculate_quantity(bal(1_700.0), 500.00, s)
-    assert d2.quantity == 1                     # 1700 - 600 - one share = 600
 
 
 def test_margin_is_not_used_by_default(tmp_path):

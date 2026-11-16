@@ -246,6 +246,7 @@ class SchwabBroker(Broker):
             )
         payload = resp.json()
         new_data = {
+            **self._tokens.data,   # keep "login" and other saved fields
             "access_token": payload["access_token"],
             "refresh_token": payload.get("refresh_token", refresh_token),
             "expires_at": time.time() + float(payload.get("expires_in", 1800)),

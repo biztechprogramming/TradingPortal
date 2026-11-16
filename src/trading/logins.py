@@ -124,6 +124,7 @@ def exchange_schwab_code(settings: Settings, login: str, code: str) -> Path:
         raise LoginError(message)
 
     payload = resp.json()
+    _refuse_other_persons_accounts(settings, login, payload["access_token"])
     token_path = settings.schwab_token_path_for(login)
     _TokenStore(token_path).save({
         "access_token": payload["access_token"],
@@ -134,6 +135,64 @@ def exchange_schwab_code(settings: Settings, login: str, code: str) -> Path:
     })
     log.info("Schwab login %r authorised; token saved to %s", login, token_path)
     return token_path
+
+
+def _accounts_for_token(settings: Settings, access_token: str) -> dict[str, str]:
+    """{hashValue: masked number} for the accounts a fresh token reaches."""
+    from .brokers.base import mask_account
+
+    try:
+        resp = httpx.get(
+            f"{settings.schwab_base_url}/trader/v1/accounts/accountNumbers",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+    except httpx.RequestError as exc:
+        raise LoginError(
+            f"Logged in, but could not list the accounts it reaches: {exc}. "
+            "Nothing was saved; log in again."
+        ) from exc
+    if resp.status_code != 200:
+        raise LoginError(
+            f"Logged in, but Schwab would not list its accounts (HTTP "
+            f"{resp.status_code}). Nothing was saved; log in again."
+        )
+    return {
+        str(item.get("hashValue", "")): mask_account(str(item.get("accountNumber", "")))
+        for item in resp.json() or []
+    }
+
+
+def _refuse_other_persons_accounts(
+    settings: Settings, login: str, access_token: str
+) -> None:
+    """Refuse a token that reaches an account another login already reaches.
+
+    Schwab's consent page signs in as whoever the browser is already signed
+    in as, not as the login that was clicked. Saving that token would make
+    two logins trade one account, so it is thrown away here instead.
+    """
+    from .brokers.schwab import discover_schwab_accounts
+
+    mine = _accounts_for_token(settings, access_token)
+    for other in settings.schwab_logins:
+        if other == login or not settings.schwab_token_path_for(other).exists():
+            continue
+        try:
+            theirs = {a.account_id for a in discover_schwab_accounts(settings, other)}
+        except Exception as exc:  # their token may be expired; can't compare
+            log.info("Could not list %r's accounts to compare: %s", other, exc)
+            continue
+        shared = sorted(mine[h] for h in mine if h in theirs)
+        if shared:
+            raise LoginError(
+                f"Wrong person: that Schwab sign-in reaches {', '.join(shared)}, "
+                f"which is {other!r}'s account. Nothing was saved for {login!r}. "
+                f"Schwab used the browser's existing sign-in. Open the login in "
+                f"a private window and sign in to Schwab as {login!r}. (If "
+                f"{', '.join(shared)} really is {login!r}'s, then {other!r}'s "
+                f"login is the wrong one: log {other!r} in again first.)"
+            )
 
 
 def schwab_token_status(settings: Settings, login: str) -> dict[str, Any]:

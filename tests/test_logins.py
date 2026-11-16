@@ -446,3 +446,48 @@ def test_login_sharing_an_account_is_flagged():
     brokers = {"a": _Wrapper(_FakeSchwab("anastasia", warning="both reach ...1354"))}
     out = _live_login_status(_ok("anastasia"), brokers)
     assert out["state"] == "shared" and "1354" in out["detail"]
+
+
+# --- wrong-person guard ------------------------------------------------------
+
+
+def _fake_schwab(monkeypatch, reached_hashes, other_hashes):
+    from trading.brokers import schwab as S
+    from trading.brokers.base import Account
+
+    def post(url, **kw):
+        return httpx.Response(200, json={"access_token": "a", "refresh_token": "r",
+                                         "expires_in": 1800})
+
+    def get(url, **kw):
+        return httpx.Response(200, json=[
+            {"accountNumber": f"9999{h[-4:]}", "hashValue": h} for h in reached_hashes])
+
+    monkeypatch.setattr(L.httpx, "post", post)
+    monkeypatch.setattr(L.httpx, "get", get)
+    monkeypatch.setattr(S, "discover_schwab_accounts", lambda settings, login: [
+        Account(account_id=h, display_id="...x", is_paper=False, account_type="")
+        for h in other_hashes])
+
+
+def test_exchange_refuses_token_reaching_another_logins_account(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    other = settings.schwab_token_path_for("joint")
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("{}")
+    _fake_schwab(monkeypatch, reached_hashes=["hash1354"], other_hashes=["hash1354"])
+
+    with pytest.raises(L.LoginError, match="Wrong person.*'joint'"):
+        L.exchange_schwab_code(settings, "personal", "code")
+    assert not settings.schwab_token_path_for("personal").exists()
+
+
+def test_exchange_saves_token_reaching_only_its_own_accounts(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    other = settings.schwab_token_path_for("joint")
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("{}")
+    _fake_schwab(monkeypatch, reached_hashes=["hash2222"], other_hashes=["hash1354"])
+
+    path = L.exchange_schwab_code(settings, "personal", "code")
+    assert json.loads(path.read_text())["login"] == "personal"

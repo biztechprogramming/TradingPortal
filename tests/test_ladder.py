@@ -286,3 +286,46 @@ def test_sell_orders_are_never_repriced(executor):
     sells = [o for o in result.open_orders if o["side"] == "SELL"]
     assert len(sells) == 1
     assert sells[0]["limit_price"] == 505.00
+
+
+def test_ladder_order_prices_from_a_peer_when_own_quote_is_missing(tmp_path):
+    """An IBKR login without API market data still places a ladder order."""
+    from trading.errors import InvalidQuoteError
+
+    s = _settings(tmp_path)
+    broker = _broker(s, cash=10_000.0)
+    broker.set_quote("QQQ", 500.00, 500.04, day_high=502.0, day_low=498.0)
+    peer = _broker(s)
+    peer.set_quote("QQQ", 500.00, 500.04, day_high=502.0, day_low=498.0)
+
+    def no_market_data(symbol):
+        raise InvalidQuoteError("no bid/ask")
+
+    broker.get_quote = no_market_data  # type: ignore[assignment]
+    ex = LadderExecutor(s, AuditLog(s.log_dir), "cmd-1",
+                        quote_fallback=lambda name, sym: ("schwab", peer.get_quote(sym)))
+
+    result = ex.place(broker, "QQQ", 498.00)
+
+    assert result.ok, result.errors
+    assert result.action == ACTION_PLACED
+    assert len(result.open_orders) == 1
+
+
+def test_ladder_order_without_any_quote_still_fails(tmp_path):
+    from trading.errors import InvalidQuoteError
+
+    s = _settings(tmp_path)
+    broker = _broker(s, cash=10_000.0)
+
+    def no_market_data(symbol):
+        raise InvalidQuoteError("no bid/ask")
+
+    broker.get_quote = no_market_data  # type: ignore[assignment]
+    ex = LadderExecutor(s, AuditLog(s.log_dir), "cmd-1",
+                        quote_fallback=lambda name, sym: None)
+
+    result = ex.place(broker, "QQQ", 498.00)
+
+    assert not result.ok
+    assert any("no bid/ask" in e for e in result.errors)

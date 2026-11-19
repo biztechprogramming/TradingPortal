@@ -38,7 +38,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from . import audit as A
 from .audit import AuditLog
@@ -55,6 +55,9 @@ from .models import Balances, Order, Quote, Side, TradingMode
 from .pricing import validate_quote
 from .sizing import calculate_quantity
 from .validation import check_market_hours, validate_order
+
+if TYPE_CHECKING:
+    from .execution import QuoteFallback
 
 log = logging.getLogger("trading.ladder")
 
@@ -339,11 +342,19 @@ class LadderExecutor:
     """
 
     def __init__(
-        self, settings: Settings, audit_log: AuditLog, command_id: str
+        self,
+        settings: Settings,
+        audit_log: AuditLog,
+        command_id: str,
+        quote_fallback: "QuoteFallback | None" = None,
     ) -> None:
         self.settings = settings
         self.audit = audit_log
         self.command_id = command_id
+        #: Lends a quote from another account when this one has none (an
+        #: IBKR login without an API market-data subscription). The quote
+        #: only feeds the guards; the order itself goes to this broker.
+        self._quote_fallback = quote_fallback
 
     def _log(self, event: str, broker: str, **payload: Any) -> None:
         self.audit.record(
@@ -360,19 +371,37 @@ class LadderExecutor:
         so a wide spread does not expose us to a bad fill the way crossing it
         would. Halted, stale and malformed quotes still hard-fail.
         """
-        quote = broker.get_quote(symbol)
+        try:
+            return self._vetted(broker.name, broker.get_quote(symbol), symbol, result)
+        except QuoteError as exc:
+            borrowed = (self._quote_fallback(broker.name, symbol)
+                        if self._quote_fallback else None)
+            if borrowed is None:
+                raise
+            source, quote = borrowed
+            try:
+                quote = self._vetted(broker.name, quote, symbol, result,
+                                     borrowed_from=source)
+            except QuoteError:
+                raise exc from None
+            log.warning("%s: no usable %s quote (%s); pricing from %s",
+                        broker.name, symbol, exc, source)
+            return quote
+
+    def _vetted(self, name: str, quote: Quote, symbol: str,
+                result: RungOrderResult, **extra: Any) -> Quote:
         try:
             validate_quote(quote, self.settings)
         except WideSpreadError as exc:
             result.warnings.append(f"wide spread accepted for a resting order: {exc}")
         except QuoteError as exc:
             self._log(
-                A.QUOTE_REJECTED, broker.name, symbol=symbol,
+                A.QUOTE_REJECTED, name, symbol=symbol,
                 quote=quote.to_dict(), reason=str(exc),
-                error_type=type(exc).__name__,
+                error_type=type(exc).__name__, **extra,
             )
             raise
-        self._log(A.QUOTE, broker.name, symbol=symbol, quote=quote.to_dict())
+        self._log(A.QUOTE, name, symbol=symbol, quote=quote.to_dict(), **extra)
         return quote
 
     def _check_deviation(self, symbol: str, price: float, quote: Quote) -> None:

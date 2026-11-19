@@ -690,7 +690,8 @@ class TradingService:
 
             def run_one(broker: Broker) -> Any:
                 return LadderExecutor(
-                    self.settings, self.audit, command_id
+                    self.settings, self.audit, command_id,
+                    quote_fallback=self._borrow_quote,
                 ).place(broker, symbol, limit_price)
 
             if targets:

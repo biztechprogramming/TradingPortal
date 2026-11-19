@@ -261,6 +261,22 @@ class IBKRBroker(Broker):
         log.warning("IBKR re-authenticate after 401 did not restore the session")
         return False
 
+    def health_check(self, max_age: float = 0.0) -> None:
+        """The gateway answers and its brokerage (trading) leg is authenticated."""
+        status = self.auth_status()
+        if not status.get("authenticated"):
+            if status.get("connected"):
+                self.connect()          # re-establishes the leg when it can
+                return
+            raise BrokerAuthError("IBKR gateway session expired; log in to IBKR.")
+        if status.get("competing"):
+            raise BrokerAuthError(
+                "Another IBKR session (TWS, Mobile or the website) has taken "
+                "over this login; log in to IBKR again."
+            )
+        if not self._connected:
+            self.connect()
+
     def auth_status(self) -> dict[str, Any]:
         data = self._request("POST", "/iserver/auth/status", retries=1)
         return data if isinstance(data, dict) else {}

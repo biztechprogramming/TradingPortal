@@ -252,6 +252,12 @@ class Settings:
     #: How long the dashboard may reuse a quote it already fetched. Display
     #: only -- order pricing always re-reads from the broker.
     quote_display_ttl_seconds: float = 5.0
+    #: Background trading-availability check per account (see health.py).
+    health_check_interval_seconds: float = 45.0
+    health_check_timeout_seconds: float = 5.0
+    #: Skip accounts whose check is red when placing buy-side orders.
+    #: GO FLAT and Cancel are always attempted everywhere.
+    health_skip_unhealthy: bool = True
 
     # --- order monitoring -------------------------------------------------
     order_fill_timeout_seconds: float = 90.0
@@ -435,6 +441,8 @@ class Settings:
             "allow_outside_rth": self.allow_outside_rth,
             "max_daily_commands": self.max_daily_commands,
             "ladder_enabled": self.ladder_enabled,
+            "health_check_interval_seconds": self.health_check_interval_seconds,
+            "health_skip_unhealthy": self.health_skip_unhealthy,
             "ladder_levels": self.ladder_levels,
             "ladder_steps": {
                 sym: self.ladder_step_for(sym) for sym in self.symbols
@@ -662,6 +670,9 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         session_days=_int("SESSION_DAYS", 2),
         session_refresh_seconds=_float("SESSION_REFRESH_SECONDS", 45.0),
         quote_display_ttl_seconds=_float("QUOTE_DISPLAY_TTL_SECONDS", 5.0),
+        health_check_interval_seconds=_float("HEALTH_CHECK_INTERVAL_SECONDS", 45.0),
+        health_check_timeout_seconds=_float("HEALTH_CHECK_TIMEOUT_SECONDS", 5.0),
+        health_skip_unhealthy=_bool("HEALTH_SKIP_UNHEALTHY", True),
         market_hours_guard=_bool("MARKET_HOURS_GUARD", True),
         allow_outside_rth=_bool("ALLOW_OUTSIDE_RTH", False),
         http_timeout_seconds=_float("HTTP_TIMEOUT_SECONDS", 15.0),

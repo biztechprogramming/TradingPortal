@@ -35,6 +35,10 @@ class BrokerConnectionError(TradingError):
     retryable = True
 
 
+class BrokerLinkDown(BrokerConnectionError):
+    """The local gateway is up but has lost its own link to the broker."""
+
+
 class BrokerAuthError(TradingError):
     """Credentials missing, expired, or rejected."""
 

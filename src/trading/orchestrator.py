@@ -44,6 +44,7 @@ from .ladder import (
     build_rung_views,
     rung_key,
 )
+from .health import Health, HealthMonitor
 from .locks import ExecutionLock
 from .session import bar_seconds, compute_session_range
 from .models import (
@@ -93,6 +94,19 @@ class TradingService:
         self._fills_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self.backfiller = Backfiller(settings, self.nav, self.audit)
         self._nav_recorded: dict[str, str] = {}
+        #: Real "can this account trade right now" answers, on a timer.
+        self.health = HealthMonitor(
+            lambda: dict(self.brokers),
+            interval=settings.health_check_interval_seconds,
+            timeout=settings.health_check_timeout_seconds,
+            on_change=self._health_changed,
+        )
+
+    def _health_changed(self, name: str, now: Health, before: Health | None) -> None:
+        self.audit.record(
+            A.HEALTH, broker=name, state=now.state, message=now.message,
+            previous=before.state if before else None,
+        )
 
     # --- connection -------------------------------------------------------
 
@@ -114,6 +128,7 @@ class TradingService:
             self._connected_once = True
         for warning in self.environment_warnings:
             log.warning("%s", warning)
+        self.health.start()
         return errors
 
     def rebuild_brokers(self) -> dict[str, str | None]:
@@ -137,7 +152,10 @@ class TradingService:
             with self._quote_memo_lock:
                 self._quote_memo.clear()
             self._fills_cache.clear()
-            return self.connect_all()
+            self.health.forget()
+            errors = self.connect_all()
+            self.health.check_all()
+            return errors
 
     def display_quote(self, broker: Broker, symbol: str) -> tuple[Any, str | None]:
         """A quote for the dashboard, memoised for a few seconds.
@@ -238,6 +256,10 @@ class TradingService:
                     snapshots[name] = future.result()
 
         market = market_status()
+        health = self.health.snapshot()
+        brokers = {n: s.to_dict() for n, s in snapshots.items()}
+        for name, entry in brokers.items():
+            entry["health"] = health.get(name)
         return {
             "mode": self.settings.mode.value,
             "live": self.settings.is_live,
@@ -250,7 +272,7 @@ class TradingService:
             },
             "config": self.settings.to_public_dict(),
             "environment_warnings": self.environment_warnings,
-            "brokers": {n: s.to_dict() for n, s in snapshots.items()},
+            "brokers": brokers,
             "combined": self._combine(snapshots),
             "state": self.state.snapshot(),
             "last_fills": self.last_fills(),
@@ -677,7 +699,15 @@ class TradingService:
         with self.lock.acquire(owner=f"{source}:{key}:{command_id}"):
             self.audit.record(A.LOCK_ACQUIRED, command_id=command_id, command=key)
             self.state.record_command(key, command_id, request_id)
-            targets = self.tradable_brokers
+            targets, skipped = self._healthy_targets(command_id, key)
+            from .ladder import RungOrderResult
+
+            for name, health in skipped.items():
+                result.results.append(RungOrderResult(
+                    broker=name, ok=False, mode=self.settings.mode,
+                    symbol=symbol, limit_price=limit_price,
+                    errors=[f"skipped, not tradable: {health.message}"],
+                ))
             self.audit.record(
                 A.COMMAND_STARTED,
                 command_id=command_id,
@@ -705,8 +735,6 @@ class TradingService:
                             result.results.append(future.result())
                         except Exception as exc:
                             log.exception("%s: ladder executor crashed", name)
-                            from .ladder import RungOrderResult
-
                             result.results.append(
                                 RungOrderResult(
                                     broker=name,
@@ -1055,6 +1083,28 @@ class TradingService:
         """
         return {n: b for n, b in self.brokers.items() if not b.read_only}
 
+    def _healthy_targets(
+        self, command_id: str, command: str
+    ) -> tuple[dict[str, Broker], dict[str, Health]]:
+        """Tradable accounts split into (send to, skip because red).
+
+        Sending an order to an account that cannot trade only produces a
+        half-finished command, so a buy is not sent there at all. Red or
+        unknown accounts are re-checked first; a stale red never blocks.
+        """
+        targets = self.tradable_brokers
+        if not self.settings.health_skip_unhealthy or not targets:
+            return targets, {}
+        skipped = self.health.unhealthy(list(targets))
+        for name, health in skipped.items():
+            self.audit.record(
+                A.SKIPPED_UNHEALTHY, command_id=command_id, command=command,
+                broker=name, state=health.state, message=health.message,
+            )
+            log.warning("%s: %s not sent, account not tradable: %s",
+                        name, command, health.message)
+        return {n: b for n, b in targets.items() if n not in skipped}, skipped
+
     def _borrow_quote(self, for_broker: str, symbol: str):
         """A quote from another connected account, for one that has none.
 
@@ -1083,6 +1133,18 @@ class TradingService:
             order_type="MARKET" if market else "LIMIT",
         )
         targets = self.tradable_brokers
+        if command is not Command.GO_FLAT:
+            # GO FLAT only reduces risk: always try it everywhere, even on an
+            # account whose last check was red.
+            targets, skipped = self._healthy_targets(command_id, command.value)
+            for name, health in skipped.items():
+                failed = BrokerResult(
+                    broker=name, command=command, ok=False,
+                    mode=self.settings.mode,
+                    errors=[f"skipped, not tradable: {health.message}"],
+                )
+                failed.finished_at = time.time()
+                result.results.append(failed)
         self.audit.record(
             A.COMMAND_STARTED,
             command_id=command_id,
@@ -1174,6 +1236,7 @@ class TradingService:
         return previous
 
     def close(self) -> None:
+        self.health.stop()
         for broker in self.brokers.values():
             try:
                 broker.close()

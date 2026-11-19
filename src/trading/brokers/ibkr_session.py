@@ -33,6 +33,11 @@ RECONNECT_INTERVAL = 5.0
 #: = restored, 2110 = gateway<->IBKR link broken.
 CONNECTIVITY_CODES = {1100, 1101, 1102, 2110}
 
+#: Codes that mean the gateway can no longer reach IBKR, and the ones that
+#: mean it can again. Between the two the socket stays up but nothing trades.
+LINK_LOST_CODES = {1100, 2110}
+LINK_RESTORED_CODES = {1101, 1102}
+
 
 def _default_ib_factory() -> Any:
     from ib_async import IB
@@ -73,6 +78,9 @@ class TwsSession:
         #: Set once the first connect attempt has finished either way, so
         #: callers stop waiting the full timeout on a gateway that is down.
         self.attempted = threading.Event()
+        #: ``(since_epoch, message)`` while the gateway reports it has lost
+        #: IBKR's servers; ``None`` while the link is believed up.
+        self.link_down: tuple[float, str] | None = None
 
     # --- lifecycle --------------------------------------------------------
 
@@ -212,6 +220,7 @@ class TwsSession:
             return
         self.generation += 1
         self.last_error = None
+        self.link_down = None
         self._connected.set()
         log.info("IB Gateway connected at %s:%s (client id %s)",
                  self.host, self.port, self.client_id)
@@ -230,6 +239,11 @@ class TwsSession:
                 self.errors.pop(key, None)
         if int(code) in CONNECTIVITY_CODES:
             log.warning("IB Gateway %s: %s", code, message)
+        if int(code) in LINK_LOST_CODES:
+            if self.link_down is None:
+                self.link_down = (time.time(), str(message))
+        elif int(code) in LINK_RESTORED_CODES:
+            self.link_down = None
 
 
 _sessions: dict[tuple[str, int, int], TwsSession] = {}

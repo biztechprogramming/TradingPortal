@@ -83,6 +83,11 @@ class FakeIB:
     def disconnect(self):
         self._connected = False
 
+    async def reqCurrentTimeAsync(self):
+        if getattr(self, "hang", False):
+            await asyncio.sleep(10)
+        return datetime.now(timezone.utc)
+
     def managedAccounts(self):
         return [ACCT]
 
@@ -344,3 +349,41 @@ def test_factory_picks_the_backend_and_honours_read_only(tmp_path):
     assert isinstance(adapter, IBKRTwsBroker)
     wrapped = apply_permissions(adapter, tws, Account(ACCT, ACCT))
     assert isinstance(wrapped, ReadOnlyBroker) and wrapped.read_only
+
+
+# --- trading availability -----------------------------------------------------
+
+
+def test_health_tracks_ibkrs_own_link_state(broker, fake):
+    from trading.errors import BrokerLinkDown
+
+    broker.health_check()                       # green
+    fake.errorEvent.emit(-1, 1100, "Connectivity between IBKR and Trader Workstation has been lost.")
+    with pytest.raises(BrokerLinkDown, match="lost its connection to IBKR"):
+        broker.health_check()
+    assert broker.connected                     # the socket never noticed
+    fake.errorEvent.emit(-1, 1102, "Connectivity ... restored - data maintained.")
+    broker.health_check()                       # green again
+
+
+def test_health_reports_a_hung_gateway(tmp_path, fake):
+    from trading.errors import BrokerTimeout
+
+    b, session = make_broker(tmp_path, fake, health_check_timeout_seconds=0.2)
+    try:
+        b.connect()
+        fake.hang = True
+        with pytest.raises(BrokerTimeout, match="Gateway unresponsive"):
+            b.health_check()
+    finally:
+        session.stop()
+
+
+def test_health_reports_a_dead_gateway(tmp_path):
+    down = FakeIB(up=False)
+    b, session = make_broker(tmp_path, down)
+    try:
+        with pytest.raises(BrokerConnectionError):
+            b.health_check()
+    finally:
+        session.stop()

@@ -177,6 +177,7 @@ function renderBrokers(status) {
         ? `${esc(b.account.display_id)}${b.account.is_paper ? ' <span class="pill pill-ok">PAPER</span>' : ''}`
         : '<span class="muted">none</span>';
       const roBadge = b.read_only ? '<span class="badge-ro">READ-ONLY</span>' : '';
+      const up = b.health ? b.health.tradable : (b.connected && !b.error);
 
       // Position is whatever the broker reports and nothing else. Last shares
       // is history -- what most recently filled -- and is shown beside it so
@@ -225,11 +226,12 @@ function renderBrokers(status) {
       return `<div class="panel">
         <div class="broker-head">
           <span class="broker-name">
-            <span class="dot ${b.connected && !b.error ? 'dot-on' : 'dot-off'}"></span>${esc(name)}${roBadge}
+            <span class="dot ${up ? 'dot-on' : 'dot-off'}"></span>${esc(name)}${roBadge}
           </span>
           <span class="pill pill-${b.exposure}">${b.exposure}</span>
         </div>
         <div class="kv"><span>Connection</span><span>${b.connected && !b.error ? 'connected' : 'disconnected'}</span></div>
+        ${tradingRow(b.health)}
         <div class="kv"><span>Account</span><span>${acct}</span></div>
         <div class="kv"><span>Cash available</span><span>${fmtMoney(b.balances?.cash_available)}</span></div>
         <div class="kv"><span>Buying power</span><span>${fmtMoney(b.balances?.buying_power)}</span></div>
@@ -257,6 +259,51 @@ function renderBrokers(status) {
       </div>`;
     })
     .join('');
+}
+
+/** The "Trading available" light: the last real check, and when it ran. */
+function tradingRow(h) {
+  if (!h) return '<div class="kv"><span>Trading</span><span class="muted">not checked yet</span></div>';
+  const at = new Date(h.checked_at * 1000).toLocaleTimeString('en-US',
+    { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  const label = {
+    ok: 'available', link_down: 'IBKR link down', unresponsive: 'unresponsive',
+    login_required: 'log in required', down: 'unavailable',
+  }[h.state] || h.state;
+  const pill = `<span class="pill ${h.tradable ? 'pill-ok' : 'pill-bad'}">${esc(label)}</span>`;
+  const msg = h.tradable ? ''
+    : `<div class="trading-msg">${esc(h.message)}</div>`;
+  return `<div class="kv"><span>Trading</span><span>${pill}
+    <span class="muted">checked ${esc(at)}</span></span></div>${msg}`;
+}
+
+// Buy buttons are shared by every account. A red account is skipped by the
+// server; the buttons only go grey when no account at all can trade.
+// GO FLAT and Cancel are never blocked.
+let noAccountTradable = false;
+const BUY_BUTTONS = ['btn-long', 'btn-short', 'btn-mkt-long', 'btn-mkt-short'];
+
+function redAccounts(status) {
+  const accts = Object.entries(status.brokers || {}).filter(([, b]) => !b.read_only);
+  const red = accts.filter(([, b]) => b.health && !b.health.tradable);
+  noAccountTradable = accts.length > 0
+    && accts.every(([, b]) => b.health) && red.length === accts.length;
+  return red;
+}
+
+function applyTradingBlock() {
+  const why = noAccountTradable
+    ? 'No account can trade right now; see the Trading light on each account. GO FLAT and Cancel still work.'
+    : '';
+  for (const id of BUY_BUTTONS) {
+    $(id).disabled = busy || noAccountTradable;
+    $(id).title = why;
+  }
+  if (!noAccountTradable) return;
+  for (const btn of document.querySelectorAll('.rung, .buy-btn, .buy-now-btn')) {
+    btn.disabled = true;
+    btn.title = why;
+  }
 }
 
 function qty(broker, symbol) {
@@ -1418,6 +1465,8 @@ async function refresh() {
     // will place a new order or re-price a working one.
     window.__lastLadder = ladder.body;
     renderLadder(ladder.body);
+    const red = redAccounts(s);
+    applyTradingBlock();
 
     const alerts = [];
     if (s.state?.mismatch) {
@@ -1432,6 +1481,13 @@ async function refresh() {
       alerts.push({
         level: 'warn',
         html: '<strong>Exposure differs between brokers.</strong> Check each account below.',
+      });
+    }
+    for (const [name, b] of red) {
+      alerts.push({
+        level: noAccountTradable ? 'error' : 'warn',
+        html: `<strong>${esc(name)}: not tradable.</strong> ${esc(b.health.message)}
+               — buy orders will skip this account.`,
       });
     }
     for (const w of s.environment_warnings || []) {
@@ -1591,6 +1647,7 @@ function setBusy(state) {
     btn.disabled = state || (btn.classList.contains('buy-now-btn')
       && !Number(btn.dataset.price));
   }
+  applyTradingBlock();
 }
 
 function askConfirm(title, body) {

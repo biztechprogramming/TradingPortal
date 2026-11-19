@@ -25,6 +25,8 @@ from ..config import Settings
 from ..errors import (
     BrokerAuthError,
     BrokerConnectionError,
+    BrokerLinkDown,
+    BrokerTimeout,
     ConfigError,
     InvalidQuoteError,
     OrderRejected,
@@ -145,6 +147,37 @@ class IBKRTwsBroker(Broker):
     @property
     def connected(self) -> bool:
         return self._connected and self.session.connected
+
+    def health_check(self, max_age: float = 0.0) -> None:
+        """Socket up, gateway linked to IBKR, and gateway answering.
+
+        An open socket alone proves nothing: IB Gateway keeps it open while
+        it has lost IBKR's servers (code 1100) or while it is hung.
+        """
+        if not self.session.connected:
+            self.session.start()
+            raise BrokerConnectionError(
+                self.session.last_error
+                or "IB Gateway is not running or not logged in. Log in to "
+                   "IBKR from the dashboard."
+            )
+        down = self.session.link_down
+        if down is not None:
+            since = datetime.fromtimestamp(down[0]).strftime("%H:%M:%S")
+            raise BrokerLinkDown(
+                f"IB Gateway lost its connection to IBKR at {since} and has "
+                f"not got it back ({down[1].strip()})"
+            )
+        timeout = self.settings.health_check_timeout_seconds
+        try:
+            self.session.call(lambda ib: ib.reqCurrentTimeAsync(), timeout)
+        except BrokerTimeout:
+            raise BrokerTimeout(
+                f"Gateway unresponsive: IB Gateway did not answer within "
+                f"{timeout:.0f}s"
+            ) from None
+        if not self._connected:
+            self.connect()
 
     def close(self) -> None:
         """The socket is shared and outlives any one adapter; nothing to do."""

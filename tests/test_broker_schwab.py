@@ -425,3 +425,26 @@ def test_recent_fills_come_from_schwab_order_history(tmp_path):
         (2000 * 27.84 + 3040 * 27.855) / 5040)
     assert fill.updated_at == datetime(
         2026, 11, 6, 14, 21, 3, tzinfo=timezone.utc).timestamp()
+
+
+# --- trading availability ---------------------------------------------------
+
+
+def test_health_check_uses_a_recent_success_and_reports_expiry(tmp_path):
+    calls = []
+    state = {"status": 200}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if state["status"] != 200:
+            return httpx.Response(state["status"], json={"error": "expired"})
+        return httpx.Response(200, json={"securitiesAccount": {}})
+
+    broker = broker_with(handler, tmp_path)
+    broker.health_check(max_age=60)
+    assert len(calls) == 1                 # nothing recent: one cheap read
+    broker.health_check(max_age=60)
+    assert len(calls) == 1                 # the read just now proved it
+    state["status"] = 401
+    with pytest.raises(BrokerAuthError):
+        broker.health_check(max_age=0)

@@ -328,12 +328,27 @@ class SchwabBroker(Broker):
                         f"Schwab {method} {path} failed "
                         f"(HTTP {resp.status_code}): {_safe_body(resp)}"
                     )
+                self._last_ok = time.monotonic()
                 return resp
             time.sleep(0.3 * (attempt + 1))
 
         raise last_exc or BrokerConnectionError(f"Schwab {method} {path} failed")
 
     # --- lifecycle --------------------------------------------------------
+
+    def health_check(self, max_age: float = 0.0) -> None:
+        """Prove the Schwab session still works, with one cheap read.
+
+        Any successful request within ``max_age`` seconds already proved it,
+        so this costs nothing against the rate limit while the dashboard is
+        polling. A rejected or unrefreshable token raises BrokerAuthError.
+        """
+        if not self._connected:
+            self.connect()
+            return
+        if max_age and time.monotonic() - getattr(self, "_last_ok", 0.0) < max_age:
+            return
+        self._account_payload(None)
 
     def connect(self) -> None:
         try:

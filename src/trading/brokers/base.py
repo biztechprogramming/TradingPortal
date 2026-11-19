@@ -67,6 +67,16 @@ class Broker(abc.ABC):
     def last_error(self) -> str | None:
         return self._last_error
 
+    def health_check(self, max_age: float = 0.0) -> None:
+        """Raise unless this account can trade right now. Must be cheap.
+
+        ``max_age``: adapters that can prove health from a recent successful
+        call may skip the network round trip when one is that fresh.
+        """
+        if not self.connected:
+            self.connect()
+        self.get_available_cash()
+
     # --- required interface ----------------------------------------------
 
     @abc.abstractmethod

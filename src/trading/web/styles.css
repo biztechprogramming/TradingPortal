@@ -342,7 +342,7 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
   gap: 4px;
 }
 
-.rung {
+.rung, .pick-rung {
   display: grid;
   grid-template-columns: 1fr auto auto;
   align-items: center;
@@ -357,7 +357,7 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
   text-align: left;
   font: inherit;
 }
-.rung:hover:not(:disabled) { border-color: var(--blue); background: #232b35; }
+.rung:hover:not(:disabled), .pick-rung:hover { border-color: var(--blue); background: #232b35; }
 .rung:disabled { opacity: .45; cursor: not-allowed; }
 .rung-price {
   font-size: 16px;
@@ -380,7 +380,7 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 /* --- typed-in price ----------------------------------------------------- */
 .order-entry { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .order-row { display: flex; gap: 6px; align-items: stretch; }
-.price-input {
+.price-input, .pick-input {
   flex: 1;
   min-width: 0;
   padding: 7px 10px;
@@ -394,8 +394,8 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
-.price-input:focus { outline: none; border-color: var(--blue); }
-.step-btn { min-width: 34px; font-size: 16px; }
+.price-input:focus, .pick-input:focus { outline: none; border-color: var(--blue); }
+.step-btn, .pick-step { min-width: 34px; font-size: 16px; }
 .buy-btn { border-color: var(--blue); }
 .order-hint { font-size: 12.5px; color: var(--muted); }
 .order-hint-warn { color: var(--amber); }
@@ -511,6 +511,17 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 
 .trading-msg { color: var(--red); font-size: 0.85em; margin: 2px 0 6px; }
 
-.limit-field { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-.limit-field input { width: 9em; font-size: 1.05em; }
-.limit-hint { font-size: 0.85em; margin: 2px 0 4px; }
+
+/* --- extended-hours price picker (GO LONG / SHORT / FLAT) -------------- */
+.modal-box.modal-wide { max-width: 560px; max-height: 90vh; overflow-y: auto; }
+.pick-leg { border-top: 1px solid var(--line); padding: 12px 0 6px; }
+.pick-head { margin-bottom: 8px; }
+.pick-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.pick-chip { font-variant-numeric: tabular-nums; }
+.pick-rungs {
+  margin-top: 8px; display: grid; gap: 4px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.pick-rung { grid-template-columns: auto 1fr auto; padding: 6px 10px; }
+.pick-rung .rung-price { font-size: 14px; }
+.pick-on, .pick-chip.pick-on { border-color: var(--blue); background: #1b2a3b; }

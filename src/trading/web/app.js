@@ -1696,102 +1696,191 @@ function needsChosenLimit(command, market) {
     && s.config?.extended_hours_require_limit !== false;
 }
 
-function bestQuote(sym) {
+function pickQuote(sym) {
+  const lq = window.__lastLadder?.symbols?.[sym]?.quote;
+  if (lq && (lq.bid > 0 || lq.ask > 0)) return lq;
   for (const b of Object.values(window.__lastStatus?.brokers || {})) {
     const q = b.quotes?.[sym];
     if (q && (q.bid > 0 || q.ask > 0)) return q;
   }
-  return null;
-}
-
-function quoteHint(sym) {
-  const q = bestQuote(sym);
-  return q ? `bid ${fmtMoney(q.bid)} · ask ${fmtMoney(q.ask)} · last ${fmtMoney(q.last)}`
-    : 'no quote available';
+  return {};
 }
 
 const heldAnywhere = (sym) => Object.values(window.__lastStatus?.brokers || {})
   .some((b) => !b.read_only && qty(b, sym) > 0);
 
-/** GO FLAT: a sell limit for each symbol any account holds. */
-function askFlatLimits() {
-  const held = [longSymbol, shortSymbol].filter(heldAnywhere);
-  if (!held.length) return Promise.resolve({});   // nothing to sell
+const sharesHeld = (sym) => Object.values(window.__lastStatus?.brokers || {})
+  .filter((b) => !b.read_only).reduce((n, b) => n + qty(b, sym), 0);
+
+/** Orders are priced in whole ticks of the order tick, not the ladder's. */
+const orderTick = () => Number(window.__lastStatus?.config?.tick_size) || 0.01;
+const fmtTick = (p) => (Number.isFinite(p) && p > 0 ? p.toFixed(2) : '');
+
+/**
+ * The ladder's levels (high/low of day, legs, steps from each) that make
+ * sense as a resting price for this side: below the ask for a buy, above
+ * the bid for a sell. Snapped to the order tick, nearest the market first.
+ */
+function channelPrices(sym, side) {
+  const q = pickQuote(sym);
+  const tick = orderTick();
+  const seen = new Map();
+  for (const r of window.__lastLadder?.symbols?.[sym]?.rungs || []) {
+    const price = snapToTick(r.price, tick);
+    const resting = side === 'BUY' ? (!q.ask || price < q.ask) : (!q.bid || price > q.bid);
+    if (!resting || seen.has(price.toFixed(2))) continue;
+    seen.set(price.toFixed(2), { price, label: r.label, anchor: r.offset_steps === 0 });
+  }
+  const list = [...seen.values()];
+  list.sort((a, b) => (side === 'BUY' ? b.price - a.price : a.price - b.price));
+  return list.slice(0, 12);
+}
+
+/**
+ * One price picker per leg, laid out like the ladder card.
+ * legs: [{ sym, side: 'BUY'|'SELL', title }]. Resolves {SYM: price} or null.
+ * Defaults: a buy starts at the bid and waits there, like the ladder; a sell
+ * starts at the bid so it fills, because an unfilled sell is cancelled at the
+ * fill timeout. Every default is one click away from any other price.
+ */
+function pickPrices(title, intro, legs) {
+  const tick = orderTick();
+  const defaults = {};
+  for (const leg of legs) {
+    const q = pickQuote(leg.sym);
+    const start = q.bid || q.last;
+    defaults[leg.sym] = start ? snapToTick(start, tick) : 0;
+  }
+  const legHtml = legs.map((leg) => {
+    const q = pickQuote(leg.sym);
+    const mid = q.bid > 0 && q.ask > 0 ? (q.bid + q.ask) / 2 : 0;
+    const chip = (label, price) => price > 0
+      ? `<button class="small pick-chip" data-sym="${esc(leg.sym)}"
+           data-price="${snapToTick(price, tick)}">${label} ${fmtTick(snapToTick(price, tick))}</button>`
+      : '';
+    const rungs = channelPrices(leg.sym, leg.side).map((c) =>
+      `<button class="pick-rung" data-sym="${esc(leg.sym)}" data-price="${c.price}">
+         <span class="rung-price">${fmtTick(c.price)}</span>
+         <span class="rung-label">${esc(c.label)}</span>
+         ${c.anchor ? '<span class="pill pill-anchor">LEVEL</span>' : ''}
+       </button>`).join('');
+    return `<div class="pick-leg">
+      <div class="pick-head"><strong>${esc(leg.title)}</strong></div>
+      <div class="order-row">
+        <button class="small pick-step" data-sym="${esc(leg.sym)}" data-dir="-1" title="Down one tick">−</button>
+        <input class="pick-input" data-sym="${esc(leg.sym)}" inputmode="decimal"
+          autocomplete="off" value="${fmtTick(defaults[leg.sym])}">
+        <button class="small pick-step" data-sym="${esc(leg.sym)}" data-dir="1" title="Up one tick">+</button>
+      </div>
+      <div class="pick-chips">${chip('Bid', q.bid)}${chip('Mid', mid)}${chip('Ask', q.ask)}${chip('Last', q.last)}</div>
+      <div class="order-hint pick-hint" id="pick-hint-${esc(leg.sym)}"></div>
+      ${rungs ? `<div class="pick-rungs">${rungs}</div>` : ''}
+    </div>`;
+  }).join('');
+
   return new Promise((resolve) => {
-    $('modal-title').textContent = 'GO FLAT: choose your limits';
-    $('modal-body').innerHTML = `
-      <p>Extended hours: each sell goes in at exactly the price you type and is
-        never repriced. Anything unfilled is cancelled after the fill timeout.</p>
-      ${held.map((sym) => `
-        <label class="limit-field"><span>Sell all ${esc(sym)} at $</span>
-          <input id="limit-flat-${esc(sym)}" type="number" step="0.01" min="0"
-            inputmode="decimal" autocomplete="off" placeholder="limit price"></label>
-        <div class="muted limit-hint">${esc(quoteHint(sym))}</div>`).join('')}
+    const box = $('modal').querySelector('.modal-box');
+    const confirmText = $('modal-confirm').textContent;
+    box?.classList.add('modal-wide');
+    $('modal-title').textContent = title;
+    $('modal-body').innerHTML = `<p class="muted">${intro}</p>${legHtml}
       <div id="limit-error" class="trading-msg"></div>`;
     $('modal').classList.remove('hidden');
-    $(`limit-flat-${held[0]}`).focus();
+
+    const input = (sym) => $('modal-body').querySelector(`.pick-input[data-sym="${CSS.escape(sym)}"]`);
+    const read = () => {
+      const out = {};
+      for (const leg of legs) out[leg.sym] = Number(input(leg.sym).value);
+      return out;
+    };
+    const update = () => {
+      const prices = read();
+      for (const leg of legs) {
+        const p = prices[leg.sym];
+        const q = pickQuote(leg.sym);
+        const hint = $(`pick-hint-${leg.sym}`);
+        hint.className = 'order-hint pick-hint';
+        if (!(p > 0)) { hint.textContent = 'enter a price'; hint.classList.add('order-hint-bad'); continue; }
+        const fills = leg.side === 'BUY' ? q.ask > 0 && p >= q.ask : q.bid > 0 && p <= q.bid;
+        const gap = leg.side === 'BUY' ? q.ask - p : p - q.bid;
+        hint.textContent = fills
+          ? `fills now: ${leg.side === 'BUY' ? 'at or above the ask' : 'at or below the bid'}`
+          : `waits: ${fmtTick(gap)} ${leg.side === 'BUY' ? 'below the ask' : 'above the bid'}`;
+        if (fills) hint.classList.add('order-hint-warn');
+        for (const el of $('modal-body').querySelectorAll(`[data-sym="${CSS.escape(leg.sym)}"][data-price]`)) {
+          el.classList.toggle('pick-on', Math.abs(Number(el.dataset.price) - p) < tick / 2);
+        }
+      }
+      $('modal-confirm').textContent = legs.map((leg) =>
+        `${leg.side === 'BUY' ? 'Buy' : 'Sell'} ${leg.sym} ${prices[leg.sym] > 0 ? '@ ' + fmtTick(prices[leg.sym]) : ''}`)
+        .join(' · ');
+    };
+    const set = (sym, price) => { input(sym).value = fmtTick(snapToTick(price, tick)); update(); };
+    const step = (sym, dir) => {
+      const cur = Number(input(sym).value) || defaults[sym];
+      if (cur) set(sym, cur + dir * tick);
+    };
     const close = (value) => {
       $('modal').classList.add('hidden');
+      box?.classList.remove('modal-wide');
+      $('modal-confirm').textContent = confirmText;
       $('modal-confirm').onclick = null;
       $('modal-cancel').onclick = null;
       resolve(value);
     };
-    $('modal-confirm').onclick = () => {
-      const out = {};
-      for (const sym of held) {
-        const v = Number($(`limit-flat-${sym}`).value);
-        if (!(v > 0)) { $('limit-error').textContent = `Enter a sell limit for ${sym}.`; return; }
-        out[sym] = v;
-      }
-      close(out);
+    const submit = () => {
+      const prices = read();
+      const missing = legs.find((leg) => !(prices[leg.sym] > 0));
+      if (missing) { $('limit-error').textContent = `Enter a price for ${missing.sym}.`; return; }
+      close(prices);
     };
+
+    for (const el of $('modal-body').querySelectorAll('.pick-chip, .pick-rung')) {
+      el.addEventListener('click', () => set(el.dataset.sym, Number(el.dataset.price)));
+    }
+    for (const el of $('modal-body').querySelectorAll('.pick-step')) {
+      el.addEventListener('click', () => step(el.dataset.sym, Number(el.dataset.dir)));
+    }
+    for (const el of $('modal-body').querySelectorAll('.pick-input')) {
+      el.addEventListener('input', update);
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submit();
+        else if (e.key === 'Escape') close(null);
+        else if (e.key === 'ArrowUp') { e.preventDefault(); step(el.dataset.sym, 1); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); step(el.dataset.sym, -1); }
+      });
+    }
+    $('modal-confirm').onclick = submit;
     $('modal-cancel').onclick = () => close(null);
+    update();
+    const first = $('modal-body').querySelector('.pick-input');
+    first?.focus();
+    first?.select();
   });
 }
 
 /** Resolves {SYM: price} or null if cancelled. */
 function askLimits(command) {
-  if (command === 'GO_FLAT') return askFlatLimits();
+  if (command === 'GO_FLAT') {
+    const held = [longSymbol, shortSymbol].filter(heldAnywhere);
+    if (!held.length) return Promise.resolve({});   // nothing to sell
+    return pickPrices('GO FLAT: set your sell prices',
+      'Extended hours: each sell goes in at exactly this price and is not '
+      + 'repriced. Unfilled after the fill timeout, it is cancelled.',
+      held.map((sym) => ({ sym, side: 'SELL', title: `Sell all ${sym} (${fmtNum(sharesHeld(sym))} shares)` })));
+  }
   const target = command === 'GO_LONG' ? longSymbol : shortSymbol;
   const other = command === 'GO_LONG' ? shortSymbol : longSymbol;
-  const holdsOther = heldAnywhere(other);
-  const field = (id, verb, sym) => `
-    <label class="limit-field"><span>${verb} ${esc(sym)} at $</span>
-      <input id="${id}" type="number" step="0.01" min="0" inputmode="decimal"
-        autocomplete="off" placeholder="limit price"></label>
-    <div class="muted limit-hint">${esc(quoteHint(sym))}</div>`;
-  return new Promise((resolve) => {
-    $('modal-title').textContent = `${command.replace('_', ' ')}: choose your limit`;
-    $('modal-body').innerHTML = `
-      <p>Extended hours: orders go in at exactly the price you type and are
-        never repriced. The buy stays working until it fills.${holdsOther
-          ? ' The sell must fill first; if it does not fill in time it is cancelled and nothing is bought.'
-          : ''}</p>
-      ${holdsOther ? field('limit-sell', 'Sell all', other) : ''}
-      ${field('limit-buy', 'Buy', target)}
-      <div id="limit-error" class="trading-msg"></div>`;
-    $('modal').classList.remove('hidden');
-    (holdsOther ? $('limit-sell') : $('limit-buy')).focus();
-    const close = (value) => {
-      $('modal').classList.add('hidden');
-      $('modal-confirm').onclick = null;
-      $('modal-cancel').onclick = null;
-      resolve(value);
-    };
-    $('modal-confirm').onclick = () => {
-      const out = {};
-      const buy = Number($('limit-buy').value);
-      if (!(buy > 0)) { $('limit-error').textContent = `Enter a buy limit for ${target}.`; return; }
-      out[target] = buy;
-      if (holdsOther) {
-        const sell = Number($('limit-sell').value);
-        if (!(sell > 0)) { $('limit-error').textContent = `Enter a sell limit for ${other}.`; return; }
-        out[other] = sell;
-      }
-      close(out);
-    };
-    $('modal-cancel').onclick = () => close(null);
-  });
+  const legs = [];
+  if (heldAnywhere(other)) {
+    legs.push({ sym: other, side: 'SELL', title: `1. Sell all ${other} (${fmtNum(sharesHeld(other))} shares)` });
+  }
+  legs.push({ sym: target, side: 'BUY', title: `${legs.length ? '2. ' : ''}Buy ${target} with the cash` });
+  return pickPrices(`${command.replace('_', ' ')}: set your price${legs.length > 1 ? 's' : ''}`,
+    'Extended hours: orders go in at exactly these prices and are not repriced. '
+    + 'The buy stays working until it fills.'
+    + (legs.length > 1 ? ' The sell must fill first; if it does not fill in time it is cancelled and nothing is bought.' : ''),
+    legs);
 }
 
 async function sendCommand(command, { market = false } = {}) {

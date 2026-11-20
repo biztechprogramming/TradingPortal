@@ -199,6 +199,19 @@ class Strategy:
 
     def _go_flat(self, broker: Broker, result: BrokerResult) -> None:
         """Sell everything we hold in either symbol. Buy nothing."""
+        if self.require_limits and not self.market:
+            # Refuse before selling anything, so a missing price never leaves
+            # one symbol sold and the other still held.
+            missing = [
+                sym for sym in (self.settings.long_symbol, self.settings.short_symbol)
+                if (p := broker.get_position(sym)) is not None and p.quantity > 0
+                and sym.upper() not in self.limit_prices
+            ]
+            if missing:
+                raise OrderValidationError(
+                    f"{broker.name}: in extended hours choose a sell limit for "
+                    f"{', '.join(missing)}; nothing was sold."
+                )
         sold_any = False
         for symbol in (self.settings.long_symbol, self.settings.short_symbol):
             fill = self._liquidate(broker, symbol, result)

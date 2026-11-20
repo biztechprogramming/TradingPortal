@@ -1691,7 +1691,7 @@ function marketConfirmBody(command, detail) {
 
 function needsChosenLimit(command, market) {
   const s = window.__lastStatus || {};
-  return !market && (command === 'GO_LONG' || command === 'GO_SHORT')
+  return !market && ['GO_LONG', 'GO_SHORT', 'GO_FLAT'].includes(command)
     && s.market?.session === 'extended'
     && s.config?.extended_hours_require_limit !== false;
 }
@@ -1710,12 +1710,51 @@ function quoteHint(sym) {
     : 'no quote available';
 }
 
+const heldAnywhere = (sym) => Object.values(window.__lastStatus?.brokers || {})
+  .some((b) => !b.read_only && qty(b, sym) > 0);
+
+/** GO FLAT: a sell limit for each symbol any account holds. */
+function askFlatLimits() {
+  const held = [longSymbol, shortSymbol].filter(heldAnywhere);
+  if (!held.length) return Promise.resolve({});   // nothing to sell
+  return new Promise((resolve) => {
+    $('modal-title').textContent = 'GO FLAT: choose your limits';
+    $('modal-body').innerHTML = `
+      <p>Extended hours: each sell goes in at exactly the price you type and is
+        never repriced. Anything unfilled is cancelled after the fill timeout.</p>
+      ${held.map((sym) => `
+        <label class="limit-field"><span>Sell all ${esc(sym)} at $</span>
+          <input id="limit-flat-${esc(sym)}" type="number" step="0.01" min="0"
+            inputmode="decimal" autocomplete="off" placeholder="limit price"></label>
+        <div class="muted limit-hint">${esc(quoteHint(sym))}</div>`).join('')}
+      <div id="limit-error" class="trading-msg"></div>`;
+    $('modal').classList.remove('hidden');
+    $(`limit-flat-${held[0]}`).focus();
+    const close = (value) => {
+      $('modal').classList.add('hidden');
+      $('modal-confirm').onclick = null;
+      $('modal-cancel').onclick = null;
+      resolve(value);
+    };
+    $('modal-confirm').onclick = () => {
+      const out = {};
+      for (const sym of held) {
+        const v = Number($(`limit-flat-${sym}`).value);
+        if (!(v > 0)) { $('limit-error').textContent = `Enter a sell limit for ${sym}.`; return; }
+        out[sym] = v;
+      }
+      close(out);
+    };
+    $('modal-cancel').onclick = () => close(null);
+  });
+}
+
 /** Resolves {SYM: price} or null if cancelled. */
 function askLimits(command) {
+  if (command === 'GO_FLAT') return askFlatLimits();
   const target = command === 'GO_LONG' ? longSymbol : shortSymbol;
   const other = command === 'GO_LONG' ? shortSymbol : longSymbol;
-  const holdsOther = Object.values(window.__lastStatus?.brokers || {})
-    .some((b) => !b.read_only && qty(b, other) > 0);
+  const holdsOther = heldAnywhere(other);
   const field = (id, verb, sym) => `
     <label class="limit-field"><span>${verb} ${esc(sym)} at $</span>
       <input id="${id}" type="number" step="0.01" min="0" inputmode="decimal"
@@ -1766,7 +1805,7 @@ async function sendCommand(command, { market = false } = {}) {
   if (needsChosenLimit(command, market)) {
     const limits = await askLimits(command);
     if (!limits) return;
-    body.limit_prices = limits;
+    if (Object.keys(limits).length) body.limit_prices = limits;
   }
   setBusy(true);
   try {

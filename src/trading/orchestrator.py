@@ -1048,7 +1048,8 @@ class TradingService:
 
         In extended hours the book is thin and a computed marketable limit
         can chase a bad price, so GO LONG / GO SHORT run only at a limit the
-        user typed. GO FLAT and market orders are unaffected.
+        user typed, and GO FLAT needs a sell limit for every symbol it will
+        sell. Market orders are unaffected.
         """
         limits: dict[str, float] = {}
         allowed = {s.upper() for s in self.settings.symbols}
@@ -1064,11 +1065,13 @@ class TradingService:
             if not value > 0:
                 raise OrderValidationError(f"{sym} limit must be positive")
             limits[sym] = round_to_tick(value, self.settings.tick_size)
-        if market or command is Command.GO_FLAT:
+        if market:
             return {}, False
         require = (self.settings.extended_hours_require_limit
                    and market_status().session == "extended")
-        if require:
+        # GO FLAT's sell limits are checked per account, against what each
+        # one actually holds, before anything is sold.
+        if require and command is not Command.GO_FLAT:
             target = (self.settings.long_symbol if command is Command.GO_LONG
                       else self.settings.short_symbol).upper()
             if target not in limits:

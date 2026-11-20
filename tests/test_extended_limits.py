@@ -32,12 +32,6 @@ def test_extended_hours_go_long_without_a_limit_is_refused(tmp_path, extended):
     assert b.get_open_orders() == []
 
 
-def test_go_flat_needs_no_limit(tmp_path, extended):
-    svc, _ = _svc(tmp_path, positions={"QQQ": 5})
-    result = svc.execute(Command.GO_FLAT)
-    assert result.results[0].ok, result.results[0].errors
-
-
 def test_chosen_buy_limit_is_placed_exactly_and_sized_at_it(tmp_path, extended):
     svc, b = _svc(tmp_path)
     result = svc.execute(Command.GO_LONG, limit_prices={"QQQ": 500.04})
@@ -101,3 +95,28 @@ def test_confirmation_is_bound_to_the_prices(tmp_path, extended):
     with pytest.raises(ConfirmationRequired):
         svc.execute(Command.GO_LONG, limit_prices={"QQQ": 501.00},
                     confirm_token=first.value.token)
+
+
+def test_extended_go_flat_without_a_sell_limit_sells_nothing(tmp_path, extended):
+    svc, b = _svc(tmp_path, positions={"QQQ": 5, "PSQ": 100})
+    result = svc.execute(Command.GO_FLAT, limit_prices={"QQQ": 500.00})
+    r = result.results[0]
+    assert not r.ok
+    assert "choose a sell limit for PSQ" in " ".join(r.errors)
+    assert b._orders == {}                 # QQQ was not sold either
+    assert b.get_position("QQQ").quantity == 5
+
+
+def test_extended_go_flat_sells_at_chosen_limits(tmp_path, extended):
+    svc, b = _svc(tmp_path, positions={"QQQ": 5, "PSQ": 100})
+    result = svc.execute(Command.GO_FLAT,
+                         limit_prices={"QQQ": 500.00, "PSQ": 32.10})
+    r = result.results[0]
+    assert r.ok, r.errors
+    assert {(o.symbol, o.limit_price) for o in b._orders.values()} == {
+        ("QQQ", 500.00), ("PSQ", 32.10)}
+
+
+def test_extended_go_flat_when_already_flat_needs_nothing(tmp_path, extended):
+    svc, _ = _svc(tmp_path)
+    assert svc.execute(Command.GO_FLAT).results[0].ok

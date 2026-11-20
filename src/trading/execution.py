@@ -403,6 +403,60 @@ class ExecutionEngine:
         self._log(A.ORDER_FILLED, broker.name, fill=fill.to_dict())
         return fill
 
+    # --- resting orders ---------------------------------------------------
+
+    #: How long a resting order is watched for an immediate reject or fill.
+    REST_ACK_SECONDS = 3.0
+
+    def place_resting_leg(self, broker: Broker, req: LegRequest) -> Fill:
+        """Place a chosen-limit order and leave it working until it fills.
+
+        Not repriced and not cancelled. It is watched briefly so a broker
+        rejection is still reported as one; whatever has filled by then is
+        in the returned fill, and the rest keeps working at the broker.
+        """
+        if req.fixed_limit is None:
+            raise OrderValidationError("a resting order needs a chosen limit")
+        price = req.fixed_limit
+        quote = self.fresh_quote(broker, req.symbol, allow_wide=True)
+        check_price_deviation(req.symbol, price, quote, self.settings)
+        record = validate_order(
+            symbol=req.symbol, side=req.side, quantity=req.quantity,
+            limit_price=price,
+            account_id=broker.account.account_id if broker.account else None,
+            settings=self.settings, balances=req.balances,
+            position_quantity=req.position_quantity,
+        )
+        self._log(A.ORDER_VALIDATED, broker.name, validation=record, resting=True)
+        order = broker.submit_limit_order(
+            req.symbol, req.side, int(req.quantity), price)
+        self._log(A.ORDER_SUBMITTED, broker.name, order=order.to_dict(),
+                  resting=True, simulated=order.simulated)
+
+        deadline = self._clock() + self.REST_ACK_SECONDS
+        while True:
+            order = broker.get_order_status(order.order_id)
+            if order.state is OrderState.REJECTED:
+                self._log(A.ORDER_REJECTED_EVT, broker.name, order=order.to_dict(),
+                          message=order.status_message)
+                raise OrderRejected(
+                    f"{broker.name}: {req.side.value} {req.symbol} rejected"
+                    + (f": {order.status_message}" if order.status_message else ""))
+            if order.state.is_terminal or self._clock() >= deadline:
+                break
+            self._sleep(self.settings.order_poll_interval_seconds)
+
+        filled = float(order.filled_quantity or 0.0)
+        working = order.state.is_open
+        return Fill(
+            symbol=req.symbol, side=req.side,
+            requested_quantity=int(req.quantity), filled_quantity=filled,
+            average_price=round(float(order.average_fill_price or 0.0), 6),
+            order_ids=[order.order_id], complete=filled >= req.quantity,
+            notes=[f"working at ${price:,.2f} until it fills (not repriced)"]
+            if working else [],
+        )
+
     # --- market orders ----------------------------------------------------
 
     def execute_market_leg(

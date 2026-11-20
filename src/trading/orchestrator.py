@@ -1022,7 +1022,8 @@ class TradingService:
                     if market else
                     f"{command.value} with your limits "
                     + ", ".join(f"{k} ${v:,.2f}" for k, v in sorted(limits.items()))
-                    + " (not repriced; any unfilled part is cancelled after "
+                    + " (not repriced; the buy stays working until it fills, "
+                    "an unfilled sell is cancelled after "
                     f"{self.settings.order_fill_timeout_seconds:.0f}s). "
                     if limits else
                     f"{command.value} in LIVE mode deploys the whole account. "

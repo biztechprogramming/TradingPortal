@@ -387,6 +387,17 @@ class Strategy:
         )
         if self.market:
             fill = self.engine.execute_market_leg(broker, req, price)
+        elif chosen is not None:
+            # A buy at a price you chose waits for the market to come to it,
+            # like a ladder order, instead of being cancelled at the timeout.
+            fill = self.engine.place_resting_leg(broker, req)
+            if not fill.complete:
+                result.warnings.append(
+                    f"BUY {fill.requested_quantity} {target} working at "
+                    f"${chosen:,.2f} until it fills"
+                    + (f" ({fill.filled_quantity:g} filled so far)"
+                       if fill.filled_quantity else "")
+                )
         else:
             fill = self.engine.execute_leg(broker, req)
         result.fills.append(fill)

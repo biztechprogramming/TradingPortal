@@ -1764,7 +1764,9 @@ function askLimits(command) {
     $('modal-title').textContent = `${command.replace('_', ' ')}: choose your limit`;
     $('modal-body').innerHTML = `
       <p>Extended hours: orders go in at exactly the price you type and are
-        never repriced. Anything unfilled is cancelled after the fill timeout.</p>
+        never repriced. The buy stays working until it fills.${holdsOther
+          ? ' The sell must fill first; if it does not fill in time it is cancelled and nothing is bought.'
+          : ''}</p>
       ${holdsOther ? field('limit-sell', 'Sell all', other) : ''}
       ${field('limit-buy', 'Buy', target)}
       <div id="limit-error" class="trading-msg"></div>`;
@@ -1840,7 +1842,9 @@ function reportResult(command, res) {
   if (b.status === 'OK') {
     const lines = (b.results || [])
       .map((r) => `${r.broker}: ${r.exposure_before} → ${r.exposure_after}` +
-        (r.last_execution_price ? `, ${r.shares} @ ${fmtMoney(r.last_execution_price)}` : ''))
+        (r.last_execution_price ? `, ${r.shares} @ ${fmtMoney(r.last_execution_price)}` : '') +
+        (r.warnings || []).filter((w) => w.includes('working at'))
+          .map((w) => ` · ${esc(w)}`).join(''))
       .join('<br>');
     setAlerts([{ level: 'ok', html: `<strong>${command} complete.</strong><br>${lines}` }]);
     return;

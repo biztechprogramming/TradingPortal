@@ -59,11 +59,11 @@ class CommandRequest(BaseModel):
     force: bool = Field(
         False, description="Bypass the duplicate-command time window"
     )
-    order_type: Literal["LIMIT", "MARKET"] = Field(
+    order_type: Literal["LIMIT"] = Field(
         "LIMIT",
         description=(
-            "LIMIT: repriced marketable limits (default). MARKET: market "
-            "orders, regular session only, always confirmed."
+            "Always LIMIT (repriced marketable limits). Market orders are "
+            "not supported and are rejected."
         ),
     )
     max_spread_ticks: dict[str, float] | None = Field(
@@ -295,7 +295,6 @@ def create_app(
                 confirm_token=payload.confirm_token,
                 force=payload.force,
                 source=source,
-                market=payload.order_type == "MARKET",
                 max_spread_ticks=payload.max_spread_ticks,
                 limit_prices=payload.limit_prices,
             )

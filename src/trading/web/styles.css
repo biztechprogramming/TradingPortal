@@ -94,7 +94,7 @@ h3 { margin: 0 0 10px; font-size: 16px; }
 .cancel-row { display: flex; align-items: center; gap: 12px; margin: -8px 0 18px; }
 .cancel-row button { padding: 8px 16px; }
 
-/* --- spread slider and market buttons ----------------------------------- */
+/* --- spread slider ----------------------------------- */
 .spread-control {
   margin: -8px 0 18px;
   padding: 10px 14px;
@@ -111,22 +111,9 @@ h3 { margin: 0 0 10px; font-size: 16px; }
 .spread-readout { font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 7.5em; text-align: right; }
 .spread-readout.spread-off-default { color: var(--amber); }
 
-.market-actions {
-  margin: 0 0 22px;
-  padding: 12px 14px 0;
-  border: 1px dashed var(--amber);
-  border-radius: var(--radius);
-}
-.market-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
-.market-head strong { color: var(--amber); letter-spacing: .06em; text-transform: uppercase; }
-.market-grid { margin: 12px 0 14px; }
-.action-market { padding: 16px 12px; }
-.action-market .action-title { font-size: 18px; }
-
 @media (max-width: 640px) {
   .actions { grid-template-columns: 1fr; }
   .action { padding: 24px 12px; }
-  .action-market { padding: 14px 12px; }
 }
 
 /* --- panels ------------------------------------------------------------ */

@@ -60,7 +60,7 @@ from .models import (
 )
 from .state import StateStore
 from .strategy import Strategy
-from .validation import check_regular_session, market_status
+from .validation import market_status
 
 log = logging.getLogger("trading.orchestrator")
 
@@ -909,7 +909,6 @@ class TradingService:
         confirm_token: str | None = None,
         force: bool = False,
         source: str = "api",
-        market: bool = False,
         max_spread_ticks: dict[str, float] | None = None,
         limit_prices: dict[str, float] | None = None,
     ) -> CommandResult:
@@ -919,8 +918,6 @@ class TradingService:
         as given and never repriced. In extended hours GO LONG and GO SHORT
         refuse to run without one for the symbol they buy.
 
-        ``market`` sends market orders instead of repriced limits; it always
-        needs confirmation and only runs in the regular session.
         ``max_spread_ticks`` overrides the maximum spread per symbol for this
         command alone (the dashboard's spread sliders, one per symbol).
         """
@@ -933,18 +930,16 @@ class TradingService:
             source=source,
             request_id=request_id,
             force=force,
-            order_type="MARKET" if market else "LIMIT",
+            order_type="LIMIT",
             max_spread_ticks=max_spread_ticks,
             limit_prices=limit_prices,
         )
 
         try:
-            if market:
-                check_regular_session(self.settings)
-            settings = self._command_settings(market, max_spread_ticks)
-            limits, require_limits = self._chosen_limits(command, market, limit_prices)
+            settings = self._command_settings(max_spread_ticks)
+            limits, require_limits = self._chosen_limits(command, limit_prices)
             self._preflight(command, request_id, confirm_token, force,
-                            command_id, market=market, limits=limits)
+                            command_id, limits=limits)
         except TradingError as exc:
             self.audit.record(
                 A.COMMAND_REJECTED,
@@ -961,7 +956,7 @@ class TradingService:
                     A.LOCK_ACQUIRED, command_id=command_id, command=command.value
                 )
                 self.state.record_command(command.value, command_id, request_id)
-                return self._run_all(command, command_id, settings, market,
+                return self._run_all(command, command_id, settings,
                                      limits=limits, require_limits=require_limits)
         except TradingError as exc:
             if isinstance(exc, ExecutionLocked):
@@ -980,7 +975,6 @@ class TradingService:
         confirm_token: str | None,
         force: bool,
         command_id: str,
-        market: bool = False,
         limits: dict[str, float] | None = None,
     ) -> None:
         """Every gate that can reject a command before the lock is taken."""
@@ -997,13 +991,11 @@ class TradingService:
             force=force,
         )
 
-        # A market order's confirmation is keyed separately, so a token
-        # issued for a limit command can never authorise a market one.
-        key = f"{command.value}:MARKET" if market else command.value
+        key = command.value
         if limits:
             # A token for one price can never authorise another.
             key += ":" + ",".join(f"{k}@{v:.4f}" for k, v in sorted(limits.items()))
-        if market or self._needs_confirmation(command):
+        if self._needs_confirmation(command):
             if not confirm_token or not self.state.consume_confirmation(
                 confirm_token, key
             ):
@@ -1017,9 +1009,6 @@ class TradingService:
                     expires_at=pending.expires_at,
                 )
                 what = (
-                    f"{command.value} AT MARKET fills at whatever price is "
-                    "available now, with no limit. "
-                    if market else
                     f"{command.value} with your limits "
                     + ", ".join(f"{k} ${v:,.2f}" for k, v in sorted(limits.items()))
                     + " (not repriced; the buy stays working until it fills, "
@@ -1042,7 +1031,7 @@ class TradingService:
             )
 
     def _chosen_limits(
-        self, command: Command, market: bool,
+        self, command: Command,
         limit_prices: dict[str, float] | None,
     ) -> tuple[dict[str, float], bool]:
         """Validate user-chosen limits; say whether this command needs them.
@@ -1050,7 +1039,7 @@ class TradingService:
         In extended hours the book is thin and a computed marketable limit
         can chase a bad price, so GO LONG / GO SHORT run only at a limit the
         user typed, and GO FLAT needs a sell limit for every symbol it will
-        sell. Market orders are unaffected.
+        sell.
         """
         limits: dict[str, float] = {}
         allowed = {s.upper() for s in self.settings.symbols}
@@ -1066,8 +1055,6 @@ class TradingService:
             if not value > 0:
                 raise OrderValidationError(f"{sym} limit must be positive")
             limits[sym] = round_to_tick(value, self.settings.tick_size)
-        if market:
-            return {}, False
         require = (self.settings.extended_hours_require_limit
                    and market_status().session == "extended")
         # GO FLAT's sell limits are checked per account, against what each
@@ -1088,7 +1075,7 @@ class TradingService:
     SPREAD_TICKS_MAX = 100.0
 
     def _command_settings(
-        self, market: bool, max_spread_ticks: dict[str, float] | None
+        self, max_spread_ticks: dict[str, float] | None
     ) -> Settings:
         """Settings for one command, with its spread overrides applied."""
         settings = self.settings
@@ -1112,14 +1099,6 @@ class TradingService:
                     )
                 limits[sym] = float(ticks)
             settings = replace(settings, max_spread_ticks_by_symbol=limits)
-        if market:
-            # A market order is placed to get in now, so the tick limit on
-            # the spread does not apply; the bps backstop still does, so a
-            # broken or one-sided book is still refused.
-            settings = replace(
-                settings,
-                max_spread_ticks_by_symbol={sym: 0.0 for sym in settings.symbols},
-            )
         return settings
 
     def _needs_confirmation(self, command: Command) -> bool:
@@ -1185,7 +1164,6 @@ class TradingService:
         command: Command,
         command_id: str,
         settings: Settings | None = None,
-        market: bool = False,
         *,
         limits: dict[str, float] | None = None,
         require_limits: bool = False,
@@ -1193,7 +1171,7 @@ class TradingService:
         settings = settings or self.settings
         result = CommandResult(
             command_id=command_id, command=command, mode=self.settings.mode,
-            order_type="MARKET" if market else "LIMIT",
+            order_type="LIMIT",
         )
         targets = self.tradable_brokers
         if command is not Command.GO_FLAT:
@@ -1221,7 +1199,7 @@ class TradingService:
         def run_one(name: str, broker: Broker) -> BrokerResult:
             strategy = Strategy(
                 settings, self.audit, command_id,
-                quote_fallback=self._borrow_quote, market=market,
+                quote_fallback=self._borrow_quote,
                 limit_prices=limits, require_limits=require_limits,
             )
             return strategy.run(broker, command)

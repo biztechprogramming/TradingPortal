@@ -27,7 +27,7 @@ from .models import (
     exposure_from_positions,
 )
 from .sizing import calculate_quantity
-from .validation import check_market_hours, check_regular_session
+from .validation import check_market_hours
 
 log = logging.getLogger("trading.strategy")
 
@@ -44,7 +44,6 @@ class Strategy:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         quote_fallback: QuoteFallback | None = None,
-        market: bool = False,
         limit_prices: dict[str, float] | None = None,
         require_limits: bool = False,
     ) -> None:
@@ -53,8 +52,6 @@ class Strategy:
         self.limit_prices = {k.upper(): v for k, v in (limit_prices or {}).items()}
         #: Extended hours: every leg of GO LONG/SHORT must use a chosen limit.
         self.require_limits = require_limits
-        #: Use market orders instead of repriced marketable limits.
-        self.market = market
         self.audit = audit_log
         self.command_id = command_id
         self._sleep = sleep
@@ -71,8 +68,6 @@ class Strategy:
         )
         try:
             check_market_hours(self.settings)
-            if self.market:
-                check_regular_session(self.settings)
 
             if not broker.connected:
                 broker.connect()
@@ -199,7 +194,7 @@ class Strategy:
 
     def _go_flat(self, broker: Broker, result: BrokerResult) -> None:
         """Sell everything we hold in either symbol. Buy nothing."""
-        if self.require_limits and not self.market:
+        if self.require_limits:
             # Refuse before selling anything, so a missing price never leaves
             # one symbol sold and the other still held.
             missing = [
@@ -262,7 +257,7 @@ class Strategy:
                 )
 
         chosen = self.limit_prices.get(symbol.upper())
-        if chosen is None and self.require_limits and not self.market:
+        if chosen is None and self.require_limits:
             raise OrderValidationError(
                 f"{broker.name} holds {quantity} {symbol}, which must be sold "
                 f"first. In extended hours choose a sell limit for {symbol}."
@@ -274,11 +269,7 @@ class Strategy:
             position_quantity=position.quantity,
             fixed_limit=chosen,
         )
-        if self.market:
-            quote = self.engine.fresh_quote(broker, symbol)
-            fill = self.engine.execute_market_leg(broker, req, quote.bid)
-        else:
-            fill = self.engine.execute_leg(broker, req)
+        fill = self.engine.execute_leg(broker, req)
         result.fills.append(fill)
         return fill
 
@@ -316,7 +307,7 @@ class Strategy:
         existing_qty = existing.quantity if existing else 0.0
 
         chosen = self.limit_prices.get(target.upper())
-        if chosen is None and self.require_limits and not self.market:
+        if chosen is None and self.require_limits:
             raise OrderValidationError(
                 f"In extended hours choose a buy limit for {target}."
             )
@@ -325,16 +316,7 @@ class Strategy:
         from .pricing import compute_limit_price
 
         decision = compute_limit_price(quote, Side.BUY, self.settings)
-        # A market buy has no price bound, so size it against the worst price
-        # the limit path would ever accept. That keeps a fast market from
-        # turning into a funds rejection.
-        if chosen is not None and not self.market:
-            price = chosen
-        else:
-            price = (
-                quote.ask + self.settings.guard_distance_for(target, quote.ask)
-                if self.market else decision.limit_price
-            )
+        price = chosen if chosen is not None else decision.limit_price
         sizing = calculate_quantity(balances, price, self.settings, target)
         self.audit.record(
             A.SIZING,
@@ -344,7 +326,7 @@ class Strategy:
             sizing=sizing.to_dict(),
             price_decision=decision.to_dict(),
             existing_position=existing_qty,
-            order_type="MARKET" if self.market else "LIMIT",
+            order_type="LIMIT",
             sized_at=price,
         )
 
@@ -364,7 +346,7 @@ class Strategy:
             result.errors.append(
                 f"insufficient funds: ${balances.cash_available:,.2f} available, "
                 f"${self.settings.cash_buffer_dollars:,.2f} buffer, "
-                f"{target} {'est.' if self.market else 'limit'} ${price:,.2f} -> "
+                f"{target} limit ${price:,.2f} -> "
                 f"{sizing.quantity} shares{why}"
             )
             return
@@ -383,11 +365,9 @@ class Strategy:
             quantity=sizing.quantity,
             budget=budget,
             balances=balances,
-            fixed_limit=chosen if not self.market else None,
+            fixed_limit=chosen,
         )
-        if self.market:
-            fill = self.engine.execute_market_leg(broker, req, price)
-        elif chosen is not None:
+        if chosen is not None:
             # A buy at a price you chose waits for the market to come to it,
             # like a ladder order, instead of being cancelled at the timeout.
             fill = self.engine.place_resting_leg(broker, req)

@@ -142,8 +142,6 @@ function renderCombined(c) {
   if (c.chart_symbols?.length) chartSymbols = c.chart_symbols;
   $('long-sub').textContent = longSymbol;
   $('short-sub').textContent = shortSymbol;
-  for (const el of document.querySelectorAll('.mkt-long-sym')) el.textContent = longSymbol;
-  for (const el of document.querySelectorAll('.mkt-short-sym')) el.textContent = shortSymbol;
 
   const stats = [
     ['Exposure', `<span class="pill pill-${c.exposure}">${c.exposure}</span>`],
@@ -281,7 +279,7 @@ function tradingRow(h) {
 // server; the buttons only go grey when no account at all can trade.
 // GO FLAT and Cancel are never blocked.
 let noAccountTradable = false;
-const BUY_BUTTONS = ['btn-long', 'btn-short', 'btn-mkt-long', 'btn-mkt-short'];
+const BUY_BUTTONS = ['btn-long', 'btn-short'];
 
 function redAccounts(status) {
   const accts = Object.entries(status.brokers || {}).filter(([, b]) => !b.read_only);
@@ -1420,8 +1418,7 @@ function toastCommandErrors(status) {
     { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/New_York' });
   for (const r of last.results || []) {
     if (r.ok || !(r.errors || []).length) continue;
-    const label = last.order_type === 'MARKET' ? marketLabel(last.command) : last.command;
-    toast(`${label} failed at ${r.broker} (${at}): ${r.errors[0]}`,
+    toast(`${last.command} failed at ${r.broker} (${at}): ${r.errors[0]}`,
       { error: true, ms: 15000 });
   }
 }
@@ -1453,9 +1450,6 @@ async function refresh() {
     renderCombined(s.combined || {});
     renderSpreadControl(s.config || {});
     renderCancelButton(s);
-    // Market-order buttons exist only while the regular session is running;
-    // the server refuses them outside it regardless.
-    $('market-actions').classList.toggle('hidden', s.market?.session !== 'regular');
     renderBrokers(s);
     toastCommandErrors(s);
     renderHoldings(holdings.body);
@@ -1635,9 +1629,7 @@ async function cancelWorkingOrders() {
 
 $('btn-cancel-orders').addEventListener('click', cancelWorkingOrders);
 
-const COMMAND_BUTTONS = [
-  'btn-long', 'btn-short', 'btn-flat', 'btn-mkt-long', 'btn-mkt-short', 'btn-mkt-flat',
-];
+const COMMAND_BUTTONS = ['btn-long', 'btn-short', 'btn-flat'];
 
 function setBusy(state) {
   busy = state;
@@ -1667,31 +1659,13 @@ function askConfirm(title, body) {
   });
 }
 
-function marketLabel(command) {
-  if (command === 'GO_LONG') return `BUY ${longSymbol} AT MARKET`;
-  if (command === 'GO_SHORT') return `BUY ${shortSymbol} AT MARKET`;
-  return 'FLAT AT MARKET';
-}
-
-function marketConfirmBody(command, detail) {
-  const target = command === 'GO_LONG' ? longSymbol : shortSymbol;
-  const other = command === 'GO_LONG' ? shortSymbol : longSymbol;
-  const what = command === 'GO_FLAT'
-    ? `Sells all ${esc(longSymbol)} and ${esc(shortSymbol)} in every account.`
-    : `Sells any ${esc(other)}, then buys ${esc(target)} with the available
-       cash in every account.`;
-  return `<p class="confirm-warn"><strong>Market orders fill at whatever price
-    is available now.</strong> There is no limit price and no spread check.</p>
-    <p>${what}</p><p class="muted">${esc(detail)}</p>`;
-}
-
 // --- extended hours: you choose the limit ------------------------------------
 // Outside the regular session the book is thin, so GO LONG / GO SHORT run only
 // at prices typed here. The server refuses them without one, too.
 
-function needsChosenLimit(command, market) {
+function needsChosenLimit(command) {
   const s = window.__lastStatus || {};
-  return !market && ['GO_LONG', 'GO_SHORT', 'GO_FLAT'].includes(command)
+  return ['GO_LONG', 'GO_SHORT', 'GO_FLAT'].includes(command)
     && s.market?.session === 'extended'
     && s.config?.extended_hours_require_limit !== false;
 }
@@ -1883,17 +1857,13 @@ function askLimits(command) {
     legs);
 }
 
-async function sendCommand(command, { market = false } = {}) {
+async function sendCommand(command) {
   if (busy) return;
   const requestId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const label = market ? marketLabel(command) : command;
   const body = { command, request_id: requestId };
-  if (market) body.order_type = 'MARKET';
-  else {
-    const spreads = spreadOverrides();
-    if (spreads) body.max_spread_ticks = spreads;
-  }
-  if (needsChosenLimit(command, market)) {
+  const spreads = spreadOverrides();
+  if (spreads) body.max_spread_ticks = spreads;
+  if (needsChosenLimit(command)) {
     const limits = await askLimits(command);
     if (!limits) return;
     if (Object.keys(limits).length) body.limit_prices = limits;
@@ -1904,11 +1874,9 @@ async function sendCommand(command, { market = false } = {}) {
 
     if (res.status === 409 && res.body.status === 'CONFIRMATION_REQUIRED') {
       const ok = await askConfirm(
-        `Confirm ${market ? label : command.replace('_', ' ')}`,
-        market
-          ? marketConfirmBody(command, res.body.detail)
-          : `<strong>This is a LIVE order and will deploy the whole account.</strong>
-             <br><br>${esc(res.body.detail)}`,
+        `Confirm ${command.replace('_', ' ')}`,
+        `<strong>This is a LIVE order and will deploy the whole account.</strong>
+         <br><br>${esc(res.body.detail)}`,
       );
       if (!ok) { setBusy(false); return; }
       res = await api('/api/command', {
@@ -1917,7 +1885,7 @@ async function sendCommand(command, { market = false } = {}) {
       });
     }
 
-    reportResult(label, res);
+    reportResult(command, res);
   } catch (err) {
     setAlerts([{ level: 'error', html: esc(String(err)) }]);
   } finally {
@@ -1958,10 +1926,6 @@ function reportResult(command, res) {
 for (const id of ['btn-long', 'btn-short', 'btn-flat']) {
   $(id).addEventListener('click', (e) =>
     sendCommand(e.currentTarget.dataset.command));
-}
-for (const id of ['btn-mkt-long', 'btn-mkt-short', 'btn-mkt-flat']) {
-  $(id).addEventListener('click', (e) =>
-    sendCommand(e.currentTarget.dataset.command, { market: true }));
 }
 $('btn-refresh').addEventListener('click', refresh);
 

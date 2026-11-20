@@ -15,7 +15,7 @@ from . import audit as A
 from .audit import AuditLog
 from .brokers.base import Broker
 from .config import Settings
-from .errors import TradingError
+from .errors import OrderValidationError, TradingError
 from .execution import ExecutionEngine, LegRequest, QuoteFallback, leg_from_exception
 from .models import (
     Balances,
@@ -45,8 +45,14 @@ class Strategy:
         clock: Callable[[], float] = time.monotonic,
         quote_fallback: QuoteFallback | None = None,
         market: bool = False,
+        limit_prices: dict[str, float] | None = None,
+        require_limits: bool = False,
     ) -> None:
         self.settings = settings
+        #: Limits the user chose, by symbol. Placed as given, never repriced.
+        self.limit_prices = {k.upper(): v for k, v in (limit_prices or {}).items()}
+        #: Extended hours: every leg of GO LONG/SHORT must use a chosen limit.
+        self.require_limits = require_limits
         #: Use market orders instead of repriced marketable limits.
         self.market = market
         self.audit = audit_log
@@ -242,11 +248,18 @@ class Strategy:
                     "violation if they were bought with unsettled cash"
                 )
 
+        chosen = self.limit_prices.get(symbol.upper())
+        if chosen is None and self.require_limits and not self.market:
+            raise OrderValidationError(
+                f"{broker.name} holds {quantity} {symbol}, which must be sold "
+                f"first. In extended hours choose a sell limit for {symbol}."
+            )
         req = LegRequest(
             symbol=symbol,
             side=Side.SELL,
             quantity=quantity,
             position_quantity=position.quantity,
+            fixed_limit=chosen,
         )
         if self.market:
             quote = self.engine.fresh_quote(broker, symbol)
@@ -289,17 +302,26 @@ class Strategy:
         existing = broker.get_position(target)
         existing_qty = existing.quantity if existing else 0.0
 
-        quote = self.engine.fresh_quote(broker, target)
+        chosen = self.limit_prices.get(target.upper())
+        if chosen is None and self.require_limits and not self.market:
+            raise OrderValidationError(
+                f"In extended hours choose a buy limit for {target}."
+            )
+        quote = self.engine.fresh_quote(
+            broker, target, allow_wide=chosen is not None)
         from .pricing import compute_limit_price
 
         decision = compute_limit_price(quote, Side.BUY, self.settings)
         # A market buy has no price bound, so size it against the worst price
         # the limit path would ever accept. That keeps a fast market from
         # turning into a funds rejection.
-        price = (
-            quote.ask + self.settings.guard_distance_for(target, quote.ask)
-            if self.market else decision.limit_price
-        )
+        if chosen is not None and not self.market:
+            price = chosen
+        else:
+            price = (
+                quote.ask + self.settings.guard_distance_for(target, quote.ask)
+                if self.market else decision.limit_price
+            )
         sizing = calculate_quantity(balances, price, self.settings, target)
         self.audit.record(
             A.SIZING,
@@ -348,6 +370,7 @@ class Strategy:
             quantity=sizing.quantity,
             budget=budget,
             balances=balances,
+            fixed_limit=chosen if not self.market else None,
         )
         if self.market:
             fill = self.engine.execute_market_leg(broker, req, price)

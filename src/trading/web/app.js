@@ -1448,6 +1448,7 @@ async function refresh() {
       api('/api/ladder'),
     ]);
     const s = status.body;
+    window.__lastStatus = s;
     renderBanner(s);
     renderCombined(s.combined || {});
     renderSpreadControl(s.config || {});
@@ -1684,6 +1685,74 @@ function marketConfirmBody(command, detail) {
     <p>${what}</p><p class="muted">${esc(detail)}</p>`;
 }
 
+// --- extended hours: you choose the limit ------------------------------------
+// Outside the regular session the book is thin, so GO LONG / GO SHORT run only
+// at prices typed here. The server refuses them without one, too.
+
+function needsChosenLimit(command, market) {
+  const s = window.__lastStatus || {};
+  return !market && (command === 'GO_LONG' || command === 'GO_SHORT')
+    && s.market?.session === 'extended'
+    && s.config?.extended_hours_require_limit !== false;
+}
+
+function bestQuote(sym) {
+  for (const b of Object.values(window.__lastStatus?.brokers || {})) {
+    const q = b.quotes?.[sym];
+    if (q && (q.bid > 0 || q.ask > 0)) return q;
+  }
+  return null;
+}
+
+function quoteHint(sym) {
+  const q = bestQuote(sym);
+  return q ? `bid ${fmtMoney(q.bid)} · ask ${fmtMoney(q.ask)} · last ${fmtMoney(q.last)}`
+    : 'no quote available';
+}
+
+/** Resolves {SYM: price} or null if cancelled. */
+function askLimits(command) {
+  const target = command === 'GO_LONG' ? longSymbol : shortSymbol;
+  const other = command === 'GO_LONG' ? shortSymbol : longSymbol;
+  const holdsOther = Object.values(window.__lastStatus?.brokers || {})
+    .some((b) => !b.read_only && qty(b, other) > 0);
+  const field = (id, verb, sym) => `
+    <label class="limit-field"><span>${verb} ${esc(sym)} at $</span>
+      <input id="${id}" type="number" step="0.01" min="0" inputmode="decimal"
+        autocomplete="off" placeholder="limit price"></label>
+    <div class="muted limit-hint">${esc(quoteHint(sym))}</div>`;
+  return new Promise((resolve) => {
+    $('modal-title').textContent = `${command.replace('_', ' ')}: choose your limit`;
+    $('modal-body').innerHTML = `
+      <p>Extended hours: orders go in at exactly the price you type and are
+        never repriced. Anything unfilled is cancelled after the fill timeout.</p>
+      ${holdsOther ? field('limit-sell', 'Sell all', other) : ''}
+      ${field('limit-buy', 'Buy', target)}
+      <div id="limit-error" class="trading-msg"></div>`;
+    $('modal').classList.remove('hidden');
+    (holdsOther ? $('limit-sell') : $('limit-buy')).focus();
+    const close = (value) => {
+      $('modal').classList.add('hidden');
+      $('modal-confirm').onclick = null;
+      $('modal-cancel').onclick = null;
+      resolve(value);
+    };
+    $('modal-confirm').onclick = () => {
+      const out = {};
+      const buy = Number($('limit-buy').value);
+      if (!(buy > 0)) { $('limit-error').textContent = `Enter a buy limit for ${target}.`; return; }
+      out[target] = buy;
+      if (holdsOther) {
+        const sell = Number($('limit-sell').value);
+        if (!(sell > 0)) { $('limit-error').textContent = `Enter a sell limit for ${other}.`; return; }
+        out[other] = sell;
+      }
+      close(out);
+    };
+    $('modal-cancel').onclick = () => close(null);
+  });
+}
+
 async function sendCommand(command, { market = false } = {}) {
   if (busy) return;
   const requestId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1693,6 +1762,11 @@ async function sendCommand(command, { market = false } = {}) {
   else {
     const spreads = spreadOverrides();
     if (spreads) body.max_spread_ticks = spreads;
+  }
+  if (needsChosenLimit(command, market)) {
+    const limits = await askLimits(command);
+    if (!limits) return;
+    body.limit_prices = limits;
   }
   setBusy(true);
   try {

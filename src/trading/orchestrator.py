@@ -37,6 +37,7 @@ from .errors import (
     OrderValidationError,
     TradingError,
 )
+from .pricing import round_to_tick
 from .ladder import (
     ANCHOR_NAMES,
     LadderExecutor,
@@ -910,8 +911,13 @@ class TradingService:
         source: str = "api",
         market: bool = False,
         max_spread_ticks: dict[str, float] | None = None,
+        limit_prices: dict[str, float] | None = None,
     ) -> CommandResult:
         """Run one command across every tradable account.
+
+        ``limit_prices`` are limits the user chose, by symbol, placed exactly
+        as given and never repriced. In extended hours GO LONG and GO SHORT
+        refuse to run without one for the symbol they buy.
 
         ``market`` sends market orders instead of repriced limits; it always
         needs confirmation and only runs in the regular session.
@@ -929,14 +935,16 @@ class TradingService:
             force=force,
             order_type="MARKET" if market else "LIMIT",
             max_spread_ticks=max_spread_ticks,
+            limit_prices=limit_prices,
         )
 
         try:
             if market:
                 check_regular_session(self.settings)
             settings = self._command_settings(market, max_spread_ticks)
+            limits, require_limits = self._chosen_limits(command, market, limit_prices)
             self._preflight(command, request_id, confirm_token, force,
-                            command_id, market=market)
+                            command_id, market=market, limits=limits)
         except TradingError as exc:
             self.audit.record(
                 A.COMMAND_REJECTED,
@@ -953,7 +961,8 @@ class TradingService:
                     A.LOCK_ACQUIRED, command_id=command_id, command=command.value
                 )
                 self.state.record_command(command.value, command_id, request_id)
-                return self._run_all(command, command_id, settings, market)
+                return self._run_all(command, command_id, settings, market,
+                                     limits=limits, require_limits=require_limits)
         except TradingError as exc:
             if isinstance(exc, ExecutionLocked):
                 self.audit.record(
@@ -972,6 +981,7 @@ class TradingService:
         force: bool,
         command_id: str,
         market: bool = False,
+        limits: dict[str, float] | None = None,
     ) -> None:
         """Every gate that can reject a command before the lock is taken."""
         # A prior broker disagreement blocks everything except GO FLAT, which
@@ -990,6 +1000,9 @@ class TradingService:
         # A market order's confirmation is keyed separately, so a token
         # issued for a limit command can never authorise a market one.
         key = f"{command.value}:MARKET" if market else command.value
+        if limits:
+            # A token for one price can never authorise another.
+            key += ":" + ",".join(f"{k}@{v:.4f}" for k, v in sorted(limits.items()))
         if market or self._needs_confirmation(command):
             if not confirm_token or not self.state.consume_confirmation(
                 confirm_token, key
@@ -1007,6 +1020,11 @@ class TradingService:
                     f"{command.value} AT MARKET fills at whatever price is "
                     "available now, with no limit. "
                     if market else
+                    f"{command.value} with your limits "
+                    + ", ".join(f"{k} ${v:,.2f}" for k, v in sorted(limits.items()))
+                    + " (not repriced; any unfilled part is cancelled after "
+                    f"{self.settings.order_fill_timeout_seconds:.0f}s). "
+                    if limits else
                     f"{command.value} in LIVE mode deploys the whole account. "
                 )
                 raise ConfirmationRequired(
@@ -1021,6 +1039,44 @@ class TradingService:
                 command_id=command_id,
                 command=command.value,
             )
+
+    def _chosen_limits(
+        self, command: Command, market: bool,
+        limit_prices: dict[str, float] | None,
+    ) -> tuple[dict[str, float], bool]:
+        """Validate user-chosen limits; say whether this command needs them.
+
+        In extended hours the book is thin and a computed marketable limit
+        can chase a bad price, so GO LONG / GO SHORT run only at a limit the
+        user typed. GO FLAT and market orders are unaffected.
+        """
+        limits: dict[str, float] = {}
+        allowed = {s.upper() for s in self.settings.symbols}
+        for raw, price in (limit_prices or {}).items():
+            sym = str(raw).upper().strip()
+            if sym not in allowed:
+                raise OrderValidationError(
+                    f"limit given for {sym!r}; only {sorted(allowed)} trade here")
+            try:
+                value = float(price)
+            except (TypeError, ValueError):
+                raise OrderValidationError(f"{sym} limit {price!r} is not a number")
+            if not value > 0:
+                raise OrderValidationError(f"{sym} limit must be positive")
+            limits[sym] = round_to_tick(value, self.settings.tick_size)
+        if market or command is Command.GO_FLAT:
+            return {}, False
+        require = (self.settings.extended_hours_require_limit
+                   and market_status().session == "extended")
+        if require:
+            target = (self.settings.long_symbol if command is Command.GO_LONG
+                      else self.settings.short_symbol).upper()
+            if target not in limits:
+                raise OrderValidationError(
+                    f"{command.value} in extended hours needs a buy limit you "
+                    f"choose for {target}."
+                )
+        return limits, require
 
     #: Bounds on a per-command spread override, in ticks. Each symbol has
     #: its own: QQQ trades several cents wide at the open, PSQ a penny.
@@ -1126,6 +1182,9 @@ class TradingService:
         command_id: str,
         settings: Settings | None = None,
         market: bool = False,
+        *,
+        limits: dict[str, float] | None = None,
+        require_limits: bool = False,
     ) -> CommandResult:
         settings = settings or self.settings
         result = CommandResult(
@@ -1159,6 +1218,7 @@ class TradingService:
             strategy = Strategy(
                 settings, self.audit, command_id,
                 quote_fallback=self._borrow_quote, market=market,
+                limit_prices=limits, require_limits=require_limits,
             )
             return strategy.run(broker, command)
 

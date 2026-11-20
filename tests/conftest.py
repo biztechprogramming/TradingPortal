@@ -33,6 +33,8 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         settlement_wait_seconds=0.0,
         duplicate_command_window_seconds=0.0,
         market_hours_guard=False,
+        # Tests pick their own session; real time of day must not matter.
+        extended_hours_require_limit=False,
         max_daily_commands=0,
         log_dir=tmp_path / "log",
         state_dir=tmp_path / "state",

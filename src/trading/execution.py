@@ -19,13 +19,15 @@ from .brokers.base import Broker
 from .config import Settings
 from .errors import (
     MaxSlippageExceeded,
+    OrderValidationError,
+    WideSpreadError,
     OrderRejected,
     OrderTimeout,
     QuoteError,
     TradingError,
 )
 from .models import Balances, Fill, Order, OrderState, Quote, Side
-from .pricing import compute_limit_price, should_reprice, validate_quote
+from .pricing import PriceDecision, compute_limit_price, should_reprice, validate_quote
 from .sizing import lot_floor
 from .validation import validate_order
 
@@ -43,6 +45,9 @@ class LegRequest:
     #: Position size available to sell, used by pre-submit validation.
     position_quantity: float | None = None
     balances: Balances | None = None
+    #: A limit the user chose. Placed exactly as given and never repriced;
+    #: if it has not filled by the fill timeout the remainder is cancelled.
+    fixed_limit: float | None = None
 
 
 @dataclass
@@ -116,7 +121,9 @@ class ExecutionEngine:
             event, command_id=self.command_id, broker=broker, **payload
         )
 
-    def fresh_quote(self, broker: Broker, symbol: str) -> Quote:
+    def fresh_quote(
+        self, broker: Broker, symbol: str, *, allow_wide: bool = False
+    ) -> Quote:
         """Fetch and validate a quote, auditing both outcomes.
 
         When this broker cannot price the symbol, a validated quote from
@@ -124,7 +131,7 @@ class ExecutionEngine:
         subscription does not leave a position stranded.
         """
         try:
-            return self._own_quote(broker, symbol)
+            return self._own_quote(broker, symbol, allow_wide=allow_wide)
         except QuoteError as exc:
             if self._quote_fallback is None:
                 raise
@@ -134,6 +141,9 @@ class ExecutionEngine:
             source, quote = borrowed
             try:
                 validate_quote(quote, self.settings)
+            except WideSpreadError:
+                if not allow_wide:
+                    raise exc from None
             except QuoteError:
                 raise exc from None
             self._log(
@@ -150,10 +160,22 @@ class ExecutionEngine:
             )
             return quote
 
-    def _own_quote(self, broker: Broker, symbol: str) -> Quote:
+    def _own_quote(
+        self, broker: Broker, symbol: str, *, allow_wide: bool = False
+    ) -> Quote:
         quote = broker.get_quote(symbol)
         try:
             validate_quote(quote, self.settings)
+        except WideSpreadError as exc:
+            # A price the user chose does not cross the spread on our say-so,
+            # so a wide extended-hours book is not a reason to refuse it.
+            if not allow_wide:
+                self._log(
+                    A.QUOTE_REJECTED, broker.name, symbol=symbol,
+                    quote=quote.to_dict(), reason=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise
         except QuoteError as exc:
             self._log(
                 A.QUOTE_REJECTED,
@@ -204,10 +226,21 @@ class ExecutionEngine:
 
     def execute_leg(self, broker: Broker, req: LegRequest) -> Fill:
         """Submit and manage one buy or sell until it fills, times out, or aborts."""
-        quote = self.fresh_quote(broker, req.symbol)
+        fixed = req.fixed_limit
+        quote = self.fresh_quote(broker, req.symbol, allow_wide=fixed is not None)
         anchor = quote.ask if req.side is Side.BUY else quote.bid
 
-        decision = compute_limit_price(quote, req.side, self.settings, anchor_price=anchor)
+        if fixed is not None:
+            check_price_deviation(req.symbol, fixed, quote, self.settings)
+            decision = PriceDecision(
+                symbol=req.symbol, side=req.side, limit_price=fixed,
+                reference_price=anchor, anchor_price=anchor, slippage_bps=0.0,
+                guard_price=fixed, attempt=0, spread_bps=0.0, capped=False,
+                reason="limit chosen by user; not repriced",
+            )
+        else:
+            decision = compute_limit_price(
+                quote, req.side, self.settings, anchor_price=anchor)
         state = _LegState(requested=int(req.quantity))
 
         record = validate_order(
@@ -279,7 +312,7 @@ class ExecutionEngine:
                 # Someone or something ended our order. If there is still
                 # work to do and time on the clock, resubmit the remainder;
                 # otherwise stop and report what we got.
-                if state.remaining <= 0 or self._clock() >= deadline:
+                if state.remaining <= 0 or self._clock() >= deadline or fixed:
                     break
                 state.notes.append(
                     f"order {order.order_id} ended as {order.state.value}; "
@@ -311,7 +344,8 @@ class ExecutionEngine:
                 )
                 break
 
-            if now >= next_reprice and state.reprices < self.settings.max_reprice_attempts:
+            if (fixed is None and now >= next_reprice
+                    and state.reprices < self.settings.max_reprice_attempts):
                 next_reprice = now + self.settings.reprice_interval_seconds
                 try:
                     order, current_limit = self._maybe_reprice(
@@ -654,3 +688,22 @@ class ExecutionEngine:
 def leg_from_exception(exc: BaseException) -> Fill | None:
     """Recover the partial :class:`Fill` an execution error carried, if any."""
     return getattr(exc, "fill", None)
+
+
+def check_price_deviation(
+    symbol: str, price: float, quote: Quote, settings: Settings
+) -> None:
+    """Refuse a chosen price absurdly far from the market (fat-finger guard)."""
+    reference = quote.last or quote.mid
+    if reference <= 0 or price <= 0:
+        if price <= 0:
+            raise OrderValidationError(f"{symbol} limit must be positive")
+        return
+    deviation = abs(price - reference) / reference * 100.0
+    if deviation > settings.ladder_max_deviation_pct:
+        raise OrderValidationError(
+            f"{symbol} limit ${price:,.2f} is {deviation:.1f}% away from the "
+            f"last price ${reference:,.2f}, beyond "
+            f"LADDER_MAX_DEVIATION_PCT={settings.ladder_max_deviation_pct:g}%. "
+            "Refusing as a fat-finger guard."
+        )

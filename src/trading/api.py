@@ -74,6 +74,14 @@ class CommandRequest(BaseModel):
             "configured limit."
         ),
     )
+    limit_prices: dict[str, float] | None = Field(
+        None,
+        description=(
+            'Limits you chose, by symbol, e.g. {"QQQ": 655.10, "PSQ": 27.40}. '
+            "Placed exactly as given and never repriced. Required for the "
+            "symbol bought by GO_LONG / GO_SHORT in extended hours."
+        ),
+    )
 
 
 class AcknowledgeRequest(BaseModel):
@@ -289,6 +297,7 @@ def create_app(
                 source=source,
                 market=payload.order_type == "MARKET",
                 max_spread_ticks=payload.max_spread_ticks,
+                limit_prices=payload.limit_prices,
             )
         except ConfirmationRequired as exc:
             return JSONResponse(

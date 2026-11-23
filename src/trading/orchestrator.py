@@ -245,16 +245,31 @@ class TradingService:
             self.nav.record(broker.name, point)
         self._nav_recorded[broker.name] = day
 
-    def status(self) -> dict[str, Any]:
+    def _snapshot_all(self) -> dict[str, BrokerSnapshot]:
+        """Snapshot every account, from one consistent set of brokers.
+
+        A login rebuilds the brokers and closes the old ones. A snapshot that
+        straddled that swap read closed connections and would report healthy
+        accounts as unreachable, so it is thrown away and taken again.
+        """
         snapshots: dict[str, BrokerSnapshot] = {}
-        if self.brokers:
-            with ThreadPoolExecutor(max_workers=len(self.brokers)) as pool:
-                futures = {
-                    name: pool.submit(self.snapshot_broker, broker)
-                    for name, broker in self.brokers.items()
-                }
-                for name, future in futures.items():
-                    snapshots[name] = future.result()
+        for _ in range(3):
+            brokers = self.brokers
+            snapshots = {}
+            if brokers:
+                with ThreadPoolExecutor(max_workers=len(brokers)) as pool:
+                    futures = {
+                        name: pool.submit(self.snapshot_broker, broker)
+                        for name, broker in brokers.items()
+                    }
+                    for name, future in futures.items():
+                        snapshots[name] = future.result()
+            if self.brokers is brokers:
+                break
+        return snapshots
+
+    def status(self) -> dict[str, Any]:
+        snapshots = self._snapshot_all()
 
         market = market_status()
         health = self.health.snapshot()
@@ -398,8 +413,16 @@ class TradingService:
 
     def holdings(self) -> dict[str, Any]:
         """Every position in every account, not just the two traded symbols."""
+        for _ in range(3):   # retaken if a login swapped the brokers mid-read
+            brokers = self.brokers
+            out = self._holdings_from(brokers)
+            if self.brokers is brokers:
+                break
+        return out
+
+    def _holdings_from(self, brokers: dict[str, Broker]) -> dict[str, Any]:
         out: dict[str, Any] = {"brokers": {}, "generated_at": time.time()}
-        for name, broker in self.brokers.items():
+        for name, broker in brokers.items():
             entry: dict[str, Any] = {"error": None, "positions": []}
             try:
                 if not broker.connected:

@@ -1354,8 +1354,13 @@ function renderLogins(data) {
 
   const wasBusy = loginsBusy;
   loginsBusy = flowActive || restarting || loggingOut;
-  // A login just finished: the broker set may have changed.
-  if (wasBusy && !loginsBusy) refresh();
+  // A login just finished: the broker set changed. Show it now, and again a
+  // few seconds on, once the fresh connections have settled.
+  if (wasBusy && !loginsBusy) {
+    refresh();
+    setTimeout(refresh, 3000);
+    setTimeout(refresh, 8000);
+  }
 }
 
 async function refreshLogins() {
@@ -1462,7 +1467,27 @@ $('login-paste-btn').addEventListener('click', submitPastedUrl);
 
 // --- refresh ----------------------------------------------------------------
 
-async function refresh() {
+// One refresh at a time. A request made while one is running is folded into
+// a single follow-up that starts the moment it ends, so a slow reply can never
+// land on top of a newer one and the screen always ends on the latest state.
+let refreshing = null;
+let refreshAgain = false;
+function refresh() {
+  if (refreshing) { refreshAgain = true; return refreshing; }
+  refreshing = (async () => {
+    try {
+      do {
+        refreshAgain = false;
+        await refreshOnce();
+      } while (refreshAgain);
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
+
+async function refreshOnce() {
   if (!TOKEN) { showTokenPrompt(); return; }
   try {
     const [status, holdings, audit, perf, ladder] = await Promise.all([

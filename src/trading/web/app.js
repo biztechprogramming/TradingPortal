@@ -1487,15 +1487,34 @@ function refresh() {
   return refreshing;
 }
 
+// A slow panel loads on its own, one request at a time, without making the
+// rest of the page wait for it.
+const sidePanelBusy = {};
+function sidePanel(name, path, render) {
+  if (sidePanelBusy[name]) return;
+  sidePanelBusy[name] = true;
+  api(path)
+    .then((res) => render(res.body))
+    .catch((err) => console.error(err))
+    .finally(() => { sidePanelBusy[name] = false; });
+}
+
 async function refreshOnce() {
   if (!TOKEN) { showTokenPrompt(); return; }
   try {
-    const [status, holdings, audit, perf, ladder] = await Promise.all([
+    // Each panel draws as soon as its own data is in: a broker that is slow
+    // to quote must never hold the account cards back.
+    // Kept for the confirmation dialog, which needs to state whether a
+    // click will place a new order or re-price a working one.
+    sidePanel('ladder', '/api/ladder', (body) => {
+      window.__lastLadder = body;
+      renderLadder(body);
+    });
+    sidePanel('holdings', '/api/holdings', renderHoldings);
+    const [status, audit, perf] = await Promise.all([
       api('/api/status'),
-      api('/api/holdings'),
       api('/api/audit?limit=80'),
       api('/api/performance'),
-      api('/api/ladder'),
     ]);
     const s = status.body;
     window.__lastStatus = s;
@@ -1507,14 +1526,9 @@ async function refreshOnce() {
     renderCancelButton(s);
     renderBrokers(s);
     toastCommandErrors(s);
-    renderHoldings(holdings.body);
     renderEvents(audit.body.events || []);
     renderChart(perf.body);
     renderReturns(perf.body);
-    // Kept for the confirmation dialog, which needs to state whether a click
-    // will place a new order or re-price a working one.
-    window.__lastLadder = ladder.body;
-    renderLadder(ladder.body);
     const red = redAccounts(s);
     applyTradingBlock();
 

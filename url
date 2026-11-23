@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Print the dashboard URL with the API token embedded (?token=).
+# The page moves the token into sessionStorage and strips it from the address bar.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
+ENV_FILE="${ENV_FILE:-.env}"
+
+TOKEN="$(ENV_FILE="$ENV_FILE" ./ensure-token)"
+PORT="$(grep -E '^API_PORT=.+' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+PORT="${PORT:-8787}"
+
+echo "http://localhost:${PORT}/?token=${TOKEN}"

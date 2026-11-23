@@ -142,7 +142,13 @@ function renderCombined(c) {
   shortSymbol = c.short_symbol || 'PSQ';
   // Chart set is server-driven, so adding a reference symbol is a config
   // change rather than a frontend one.
-  if (c.chart_symbols?.length) chartSymbols = c.chart_symbols;
+  if (c.chart_symbols?.length) {
+    const before = candleSymbols().join(',');
+    chartSymbols = c.chart_symbols;
+    // Charts load at startup before this list is known; fetch any new ones
+    // now rather than at the next 60s refresh.
+    if (candleSymbols().join(',') !== before) refreshCandles(false);
+  }
   $('long-sub').textContent = longSymbol;
   $('short-sub').textContent = shortSymbol;
 

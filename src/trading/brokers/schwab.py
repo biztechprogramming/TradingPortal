@@ -53,6 +53,7 @@ from ..errors import (
     RateLimited,
 )
 from ..models import (
+    FUTURES_ROOTS,
     Account,
     Bar,
     Balances,
@@ -670,6 +671,8 @@ class SchwabBroker(Broker):
         native = {"1min": 1, "5min": 5, "10min": 10, "15min": 15, "30min": 30}
         if bar_size not in native and bar_size != "1h":
             return None
+        if symbol.upper() in FUTURES_ROOTS:
+            return None   # a futures root is not a Schwab equity symbol
         frequency = native.get(bar_size, 30)
 
         resp = self._request(

@@ -31,7 +31,7 @@ from ..errors import (
     InvalidQuoteError,
     OrderRejected,
 )
-from ..models import Account, Balances, Bar, Order, OrderState, Position, Quote, Side
+from ..models import FUTURES_ROOTS, Account, Balances, Bar, Order, OrderState, Position, Quote, Side
 from ..validation import wants_outside_rth
 from .base import Broker, normalize_state
 from .ibkr import is_paper_account
@@ -361,7 +361,7 @@ class IBKRTwsBroker(Broker):
         if setting is None:
             return None
         try:
-            contract = self._contract(symbol)
+            contract = self._history_contract(symbol)
             days = max(1, math.ceil((time.time() - start) / 86400.0))
             duration = f"{days} D" if days <= 365 else f"{math.ceil(days / 365)} Y"
             rows = self._call(lambda ib: ib.reqHistoricalDataAsync(
@@ -393,10 +393,17 @@ class IBKRTwsBroker(Broker):
         """
         setting = BAR_SIZES[bar_size]
         contract = self._history_contract(symbol)
-        stamp = datetime.fromtimestamp(end, timezone.utc).strftime("%Y%m%d-%H:%M:%S")
+        if symbol.upper() in FUTURES_ROOTS:
+            # A continuous future takes no end date: ask for everything IBKR
+            # keeps (about three years) in one go. The next call finds
+            # nothing older and the backfill marks the series complete.
+            stamp, duration = "", "4 Y"
+        else:
+            stamp = datetime.fromtimestamp(end, timezone.utc).strftime("%Y%m%d-%H:%M:%S")
+            duration = "1 Y"
         rows = self._call(lambda ib: ib.reqHistoricalDataAsync(
-            contract, stamp, "1 Y", setting, "TRADES", not outside_rth,
-            formatDate=2, timeout=90), timeout=100)
+            contract, stamp, duration, setting, "TRADES", not outside_rth,
+            formatDate=2, timeout=240), timeout=250)
         bars: list[Bar] = []
         for raw in rows or []:
             ts = int(_epoch(raw.date) if isinstance(raw.date, datetime)
@@ -411,8 +418,39 @@ class IBKRTwsBroker(Broker):
     #: Chart-only reference symbols that are indexes, not stocks.
     INDEXES = {"NDX": "NASDAQ", "SPX": "CBOE", "VIX": "CBOE", "DJX": "CBOE"}
 
+    #: Re-check the front month this often; a roll is picked up within it.
+    FRONT_MONTH_TTL = 600.0
+
+    def _front_month(self, symbol: str) -> Any:
+        """The continuous future for ``symbol``, re-qualified every 10 min."""
+        key = f"FUT:{symbol}"
+        cached = self._contracts.get(key)
+        if cached and time.monotonic() - cached[1] < self.FRONT_MONTH_TTL:
+            return cached[0]
+        from ib_async import ContFuture
+        qualified = self._call(lambda ib: ib.qualifyContractsAsync(
+            ContFuture(symbol, FUTURES_ROOTS[symbol], currency="USD")))
+        if not qualified or not getattr(qualified[0], "conId", 0):
+            raise ConfigError(f"IB Gateway could not identify the {symbol} future")
+        self._contracts[key] = (qualified[0], time.monotonic())
+        return qualified[0]
+
+    def series_version(self, symbol: str) -> str | None:
+        """The front-month contract behind a continuous series, e.g. NQZ6.
+
+        IBKR back-adjusts a continuous future to its current front month, so
+        when this changes every cached bar is on the old scale.
+        """
+        symbol = symbol.upper()
+        if symbol not in FUTURES_ROOTS:
+            return None
+        contract = self._front_month(symbol)
+        return str(getattr(contract, "localSymbol", "") or contract.conId)
+
     def _history_contract(self, symbol: str) -> Any:
         symbol = symbol.upper()
+        if symbol in FUTURES_ROOTS:
+            return self._front_month(symbol)
         exchange = self.INDEXES.get(symbol)
         if exchange is None:
             return self._contract(symbol)

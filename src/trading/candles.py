@@ -34,7 +34,7 @@ from datetime import datetime
 from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
-from .models import Bar
+from .models import FUTURES_ROOTS, Bar
 
 log = logging.getLogger("trading.candles")
 
@@ -117,6 +117,18 @@ MIGRATIONS: list[tuple[int, str]] = [
             bar_size TEXT NOT NULL,
             done_at  REAL NOT NULL,
             PRIMARY KEY (symbol, bar_size)
+        );
+        """,
+    ),
+    (
+        5,
+        """
+        -- The contract a back-adjusted continuous future is scaled to. When
+        -- the front month rolls, every cached bar is on the old scale.
+        CREATE TABLE IF NOT EXISTS series_version (
+            symbol  TEXT NOT NULL PRIMARY KEY,
+            version TEXT NOT NULL,
+            seen_at REAL NOT NULL
         );
         """,
     ),
@@ -303,6 +315,24 @@ class CandleStore:
                 " VALUES (?, ?, ?)", (symbol.upper(), bar_size, time.time()))
             self._db.commit()
 
+    def version(self, symbol: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT version FROM series_version WHERE symbol = ?",
+                (symbol.upper(),)).fetchone()
+        return row["version"] if row else None
+
+    def reset_series(self, symbol: str, version: str) -> None:
+        """Forget every bar and fetch record for ``symbol``; record ``version``."""
+        sym = symbol.upper()
+        with self._lock:
+            for table in ("bars", "fetched_ranges", "history_done"):
+                self._db.execute(f"DELETE FROM {table} WHERE symbol = ?", (sym,))
+            self._db.execute(
+                "INSERT OR REPLACE INTO series_version (symbol, version, seen_at)"
+                " VALUES (?, ?, ?)", (sym, version, time.time()))
+            self._db.commit()
+
     def coverage(self, symbol: str,
                  bar_size: str = "1h") -> tuple[int | None, int | None, int]:
         """``(oldest_ts, newest_ts, count)`` for one series."""
@@ -371,6 +401,34 @@ class CandleService:
             return bars, broker.name, errors
         return [], "", errors
 
+    def check_roll(self, brokers: Sequence[Any], symbol: str) -> str | None:
+        """Start a continuous future over when its front month has rolled.
+
+        Returns the current contract (e.g. ``NQZ6``), or None for a series
+        that is not a continuous future or when no source can say.
+        """
+        for broker in brokers:
+            ask = getattr(broker, "series_version", None)
+            if ask is None or not broker.connected:
+                continue
+            try:
+                current = ask(symbol)
+            except Exception as exc:
+                log.info("%s: cannot read the %s front month: %s",
+                         broker.name, symbol, exc)
+                continue
+            if current is None:
+                return None
+            previous = self.store.version(symbol)
+            if previous != current:
+                if previous is not None:
+                    log.warning("%s rolled %s -> %s: re-downloading history "
+                                "back-adjusted to the new contract",
+                                symbol, previous, current)
+                self.store.reset_series(symbol, current)
+            return current
+        return self.store.version(symbol)
+
     def refresh(
         self,
         brokers: Sequence[Any],
@@ -379,6 +437,8 @@ class CandleService:
         bar_size: str | None = None,
     ) -> dict[str, Any]:
         """Bring ``symbol`` up to date with the smallest correct fetch."""
+        if symbol.upper() in FUTURES_ROOTS:
+            self.check_roll(brokers, symbol)
         bar_size = bar_size or self.settings.candle_bar_size
         days = days or self.settings.candle_days
         now = time.time()
@@ -492,6 +552,8 @@ class CandleService:
             "truncated": truncated,
             "history_oldest": oldest,
             "history_complete": self.store.history_complete(symbol, stored),
+            # The front-month contract a continuous future is adjusted to.
+            "contract": self.store.version(symbol),
             "refresh": meta,
         }
 
@@ -504,6 +566,8 @@ class CandleService:
         serve deep history (only IBKR can). Called repeatedly by a
         background thread, so a restart simply resumes from the oldest bar.
         """
+        if symbol.upper() in FUTURES_ROOTS:
+            self.check_roll(brokers, symbol)
         if self.store.history_complete(symbol, bar_size):
             return "done"
         sources = [b for b in brokers

@@ -234,7 +234,7 @@ bar can only say *which hour* a high happened in, which is not a time.
 | `SESSION_DAYS` | 2 | Days of the fine series kept; the rest is pruned |
 | `SESSION_REFRESH_SECONDS` | 45 | Floor between fine-series refreshes |
 | `QUOTE_DISPLAY_TTL_SECONDS` | 5 | Dashboard quote memo. Order pricing never uses it |
-| `REFERENCE_SYMBOLS` | NDX | Charted but **never** tradable — see below |
+| `REFERENCE_SYMBOLS` | NDX,NQ | Charted but **never** tradable — see below |
 
 `REFERENCE_SYMBOLS` is a comma-separated list charted alongside the traded
 pair, because QQQ and PSQ both track the Nasdaq-100 and the underlying is what
@@ -245,9 +245,11 @@ startup refuses a reference symbol that shadows `LONG_SYMBOL` or
 
 Note that `NDX` is an index, so it is only computed during the regular
 session — its chart has no extended-hours bars even when `CANDLE_OUTSIDE_RTH`
-is on. Point `REFERENCE_SYMBOLS` at a Nasdaq-100 futures contract instead if
-you want overnight coverage; set `IBKR_CONID_<SYMBOL>` to pin the contract,
-since futures symbols are ambiguous across expiries.
+is on. `NQ` (E-mini Nasdaq-100 futures, from IBKR) covers the overnight
+session: it is charted as IBKR's continuous front-month series, back-adjusted
+to the current contract. When the front month rolls (checked every 10
+minutes), the cached NQ bars are dropped and re-downloaded on the new
+contract's scale. `MNQ`, `ES` and `MES` work the same way.
 
 ---
 

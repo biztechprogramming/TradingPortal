@@ -535,7 +535,12 @@ class TradingService:
             symbols = list(dict.fromkeys(s.upper() for s in self.settings.chart_symbols))
             pending = set(symbols)
             failures: dict[str, int] = {}
-            while pending:
+            while True:
+                if not pending:
+                    # Idle, but a futures roll wipes that series' history, so
+                    # look again now and then.
+                    time.sleep(600)
+                    pending = {s for s in symbols if failures.get(s, 0) < 5}
                 progressed = False
                 for symbol in symbols:
                     if symbol not in pending:
@@ -558,7 +563,6 @@ class TradingService:
                         time.sleep(self.HISTORY_PAUSE_SECONDS)
                 if not progressed and pending:
                     time.sleep(300)   # no IBKR right now; try again later
-            log.info("hourly history backfill complete for %s", ", ".join(symbols))
 
         self._history_thread = threading.Thread(
             target=run, name="history-backfill", daemon=True)

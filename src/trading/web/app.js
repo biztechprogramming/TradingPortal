@@ -934,9 +934,12 @@ function renderCandles() {
     const refBadge = (chartSymbols || []).includes(sym)
       && sym !== longSymbol && sym !== shortSymbol
       ? '<span class="pill pill-anchor">REFERENCE</span>' : '';
+    const contract = data.contract
+      ? `<span class="muted" title="Continuous front-month future, back-adjusted to this contract. Re-downloaded automatically at each roll.">front month ${esc(data.contract)} · back-adjusted</span>`
+      : '';
     return `<div class="candle-block${isOpen ? ' candle-expanded' : ''}"
         data-block="${esc(sym)}">
-      <h3 class="sub-head">${esc(sym)}${refBadge}
+      <h3 class="sub-head">${esc(sym)}${refBadge}${contract}
         <span class="muted">${(data.bars || []).length} bars cached</span>
         <button class="small expand-btn" data-expand="${esc(sym)}">
           ${isOpen ? '✕ Close' : '⤢ Full screen'}</button>

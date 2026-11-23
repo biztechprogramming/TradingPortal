@@ -61,3 +61,45 @@ def test_backfill_walks_back_a_year_at_a_time_then_stops(tmp_path):
 def test_backfill_needs_a_history_source(tmp_path):
     svc = CandleService(make_settings(tmp_path), CandleStore(tmp_path / "c.db"))
     assert svc.backfill_history([object()], "QQQ") == "no source"
+
+
+class _Future(_Ibkr):
+    def __init__(self, floor, contract):
+        super().__init__(floor)
+        self.contract = contract
+
+    def series_version(self, symbol):
+        return self.contract if symbol == "NQ" else None
+
+    def history_chunk(self, symbol, end, *, bar_size="1h", outside_rth=True):
+        bars = super().history_chunk(symbol, end, bar_size=bar_size)
+        return [Bar(symbol="NQ", ts=b.ts, open=b.open, high=b.high, low=b.low,
+                    close=b.close, volume=b.volume) for b in bars]
+
+
+def test_a_futures_roll_restarts_the_series(tmp_path):
+    settings = make_settings(tmp_path)
+    store = CandleStore(tmp_path / "c.db")
+    svc = CandleService(settings, store)
+    now = _ts(2026, 11, 1, 10)
+    src = _Future(floor=now - 2 * 365 * 86400, contract="NQZ6")
+    store.upsert([Bar(symbol="NQ", ts=now, open=1, high=2, low=0.5, close=1.5)])
+    assert svc.check_roll([src], "NQ") == "NQZ6"
+    assert store.coverage("NQ")[2] == 0            # first sight: clean start
+    store.upsert([Bar(symbol="NQ", ts=now, open=1, high=2, low=0.5, close=1.5)])
+    while svc.backfill_history([src], "NQ") != "done":
+        pass
+    assert store.history_complete("NQ")
+    assert svc.check_roll([src], "NQ") == "NQZ6"   # same contract: kept
+    assert store.coverage("NQ")[2] > 1
+
+    src.contract = "NQH7"                          # the roll
+    assert svc.check_roll([src], "NQ") == "NQH7"
+    assert store.coverage("NQ")[2] == 0
+    assert not store.history_complete("NQ")
+    assert store.version("NQ") == "NQH7"
+
+
+def test_non_futures_have_no_version(tmp_path):
+    svc = CandleService(make_settings(tmp_path), CandleStore(tmp_path / "c.db"))
+    assert svc.check_roll([_Future(0, "NQZ6")], "QQQ") is None

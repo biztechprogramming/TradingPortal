@@ -123,7 +123,7 @@ class Settings:
     #: deliberately kept out of :attr:`symbols`, which is the tradable
     #: allowlist -- an order for one of these is rejected like any other
     #: unknown ticker.
-    reference_symbols: tuple[str, ...] = ("NDX",)
+    reference_symbols: tuple[str, ...] = ("NDX", "NQ")
 
     # --- brokers ----------------------------------------------------------
     brokers_enabled: tuple[str, ...] = ("schwab", "ibkr")
@@ -504,7 +504,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
 
     reference_symbols = tuple(
         v.strip().upper()
-        for v in (_env("REFERENCE_SYMBOLS", "NDX") or "").split(",")
+        for v in (_env("REFERENCE_SYMBOLS", "NDX,NQ") or "").split(",")
         if v.strip()
     )
 

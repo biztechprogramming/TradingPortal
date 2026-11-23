@@ -115,6 +115,11 @@ class Quote:
         return d
 
 
+#: Futures roots charted as a continuous front-month series (IBKR only).
+#: Chart-only: they are never in the tradable allowlist.
+FUTURES_ROOTS: dict[str, str] = {"NQ": "CME", "MNQ": "CME", "ES": "CME", "MES": "CME"}
+
+
 @dataclass(frozen=True)
 class Bar:
     """One OHLCV candle. ``ts`` is the bar's *opening* epoch second, UTC.

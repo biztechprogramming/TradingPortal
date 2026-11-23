@@ -252,6 +252,9 @@ class Settings:
     #: How long the dashboard may reuse a quote it already fetched. Display
     #: only -- order pricing always re-reads from the broker.
     quote_display_ttl_seconds: float = 5.0
+    #: How long /api/status waits for an account before showing its last
+    #: known state, marked stale.
+    status_deadline_seconds: float = 4.0
     #: Background trading-availability check per account (see health.py).
     health_check_interval_seconds: float = 45.0
     health_check_timeout_seconds: float = 5.0
@@ -673,6 +676,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         session_days=_int("SESSION_DAYS", 2),
         session_refresh_seconds=_float("SESSION_REFRESH_SECONDS", 45.0),
         quote_display_ttl_seconds=_float("QUOTE_DISPLAY_TTL_SECONDS", 5.0),
+        status_deadline_seconds=_float("STATUS_DEADLINE_SECONDS", 4.0),
         health_check_interval_seconds=_float("HEALTH_CHECK_INTERVAL_SECONDS", 45.0),
         health_check_timeout_seconds=_float("HEALTH_CHECK_TIMEOUT_SECONDS", 5.0),
         health_skip_unhealthy=_bool("HEALTH_SKIP_UNHEALTHY", True),

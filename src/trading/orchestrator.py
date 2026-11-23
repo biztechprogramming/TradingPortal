@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
 from typing import Any
 
@@ -92,6 +93,12 @@ class TradingService:
         self._quote_memo: dict[str, tuple[float, Any, str | None]] = {}
         self._quote_memo_lock = threading.Lock()
         self._quote_inflight: set[str] = set()
+        # Dashboard snapshots, keyed by (account name, broker object id) so a
+        # rebuild never shows an old object's state as the new one's.
+        self._snap_lock = threading.Lock()
+        self._snap_inflight: dict[tuple[str, int], Any] = {}
+        self._snap_last: dict[tuple[str, int], tuple[float, BrokerSnapshot]] = {}
+        self._snap_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="snapshot")
         #: account name -> (fetched_at, fills by symbol or None if unsupported)
         self._fills_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self.backfiller = Backfiller(settings, self.nav, self.audit)
@@ -154,6 +161,9 @@ class TradingService:
             with self._quote_memo_lock:
                 self._quote_memo = {}
                 self._quote_inflight = set()
+            with self._snap_lock:
+                self._snap_inflight.clear()
+                self._snap_last.clear()
             self._fills_cache.clear()
             self.health.forget()
             errors = self.connect_all()
@@ -274,18 +284,57 @@ class TradingService:
         snapshots: dict[str, BrokerSnapshot] = {}
         for _ in range(3):
             brokers = self.brokers
-            snapshots = {}
-            if brokers:
-                with ThreadPoolExecutor(max_workers=len(brokers)) as pool:
-                    futures = {
-                        name: pool.submit(self.snapshot_broker, broker)
-                        for name, broker in brokers.items()
-                    }
-                    for name, future in futures.items():
-                        snapshots[name] = future.result()
+            snapshots = self._snapshots_within_deadline(brokers)
             if self.brokers is brokers:
                 break
         return snapshots
+
+    def _snapshots_within_deadline(
+        self, brokers: dict[str, Broker]
+    ) -> dict[str, BrokerSnapshot]:
+        """Each account gets a few seconds; a slow one never holds up the rest.
+
+        One snapshot per account runs at a time. If it is not back by the
+        deadline, the last snapshot that account gave is shown, marked stale,
+        and the running one keeps going and is used once it lands.
+        """
+        deadline = time.monotonic() + self.settings.status_deadline_seconds
+        futures = {}
+        with self._snap_lock:
+            for name, broker in brokers.items():
+                key = (name, id(broker))
+                running = self._snap_inflight.get(key)
+                if running is None or running.done():
+                    running = self._snap_pool.submit(self._snapshot_and_keep, key, broker)
+                    self._snap_inflight[key] = running
+                futures[name] = (key, broker, running)
+        out: dict[str, BrokerSnapshot] = {}
+        for name, (key, broker, future) in futures.items():
+            try:
+                out[name] = future.result(max(0.0, deadline - time.monotonic()))
+                continue
+            except FutureTimeout:
+                pass
+            with self._snap_lock:
+                last = self._snap_last.get(key)
+            if last is not None:
+                out[name] = replace(last[1], stale_since=last[0])
+            else:
+                out[name] = BrokerSnapshot(
+                    broker=broker.name, connected=broker.connected,
+                    mode=self.settings.mode, read_only=broker.read_only,
+                    broker_type=broker.broker_type,
+                    error=f"{broker.broker_type or broker.name} is slow to answer; "
+                          "still trying.",
+                )
+        return out
+
+    def _snapshot_and_keep(self, key: tuple[str, int], broker: Broker) -> BrokerSnapshot:
+        snapshot = self.snapshot_broker(broker)
+        if not snapshot.error:
+            with self._snap_lock:
+                self._snap_last[key] = (time.time(), snapshot)
+        return snapshot
 
     def status(self) -> dict[str, Any]:
         snapshots = self._snapshot_all()

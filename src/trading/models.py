@@ -285,6 +285,9 @@ class BrokerSnapshot:
     #: True when this account may be read but never traded.
     read_only: bool = False
     broker_type: str = ""
+    #: Set when the broker did not answer in time and this is the last
+    #: snapshot it did give: when that was taken (epoch seconds).
+    stale_since: float | None = None
 
     def position_qty(self, symbol: str) -> float:
         for p in self.positions:
@@ -306,6 +309,7 @@ class BrokerSnapshot:
             "broker_type": self.broker_type,
             "error": self.error,
             "quotes": {k: v.to_dict() for k, v in self.quotes.items()},
+            "stale_since": self.stale_since,
         }
 
 

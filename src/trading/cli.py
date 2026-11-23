@@ -546,6 +546,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .api import create_app
     import uvicorn
 
+    import faulthandler
+    import signal
+    # `kill -USR1 <pid>` writes every thread's stack to the log: the way to
+    # see what a hung request is waiting on.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
     settings = load_settings(args.env_file)
     token = ensure_api_token(settings)
     print(f"\n{_mode_banner(settings)}")

@@ -171,9 +171,14 @@ function renderBrokers(status) {
     .map(([name, b]) => {
       // Only what is wrong right now stays on the card. A failed command is
       // a past event and is announced once, as a toast (toastCommandErrors).
-      const errorHtml = b.error
+      const errorHtml = (b.error
         ? `<div class="alert alert-error" style="margin-top:10px">${esc(b.error)}</div>`
-        : '';
+        : '')
+        + (b.stale_since
+          ? `<div class="alert alert-warn" style="margin-top:10px">${esc(b.broker_type === 'schwab' ? 'Schwab' : b.broker_type || 'Broker')}
+             is slow to answer. Showing what it reported at
+             ${new Date(b.stale_since * 1000).toLocaleTimeString()}; still updating.</div>`
+          : '');
       const acct = b.account
         ? `${esc(b.account.display_id)}${b.account.is_paper ? ' <span class="pill pill-ok">PAPER</span>' : ''}`
         : '<span class="muted">none</span>';

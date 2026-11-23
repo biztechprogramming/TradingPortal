@@ -91,6 +91,7 @@ class TradingService:
         #: :meth:`display_quote`.
         self._quote_memo: dict[str, tuple[float, Any, str | None]] = {}
         self._quote_memo_lock = threading.Lock()
+        self._quote_inflight: set[str] = set()
         #: account name -> (fetched_at, fills by symbol or None if unsupported)
         self._fills_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self.backfiller = Backfiller(settings, self.nav, self.audit)
@@ -151,7 +152,8 @@ class TradingService:
                     except Exception:
                         pass
             with self._quote_memo_lock:
-                self._quote_memo.clear()
+                self._quote_memo = {}
+                self._quote_inflight = set()
             self._fills_cache.clear()
             self.health.forget()
             errors = self.connect_all()
@@ -178,16 +180,33 @@ class TradingService:
             cached = self._quote_memo.get(key)
             if cached and now - cached[0] < ttl:
                 return cached[1], cached[2]
-        try:
-            quote = broker.get_quote(symbol)
-            entry = (time.time(), quote, None)
-        except Exception as exc:
-            # Failures are memoised too, and that is the point: a missing
-            # market-data subscription must not cost a retry storm per poll.
-            entry = (time.time(), None, str(exc))
-        with self._quote_memo_lock:
-            self._quote_memo[key] = entry
-        return entry[1], entry[2]
+            if key in self._quote_inflight:
+                # Someone is already asking the broker; never stack a second
+                # slow call behind it.
+                return (cached[1], cached[2]) if cached else (None, "quote loading")
+            inflight, memo = self._quote_inflight, self._quote_memo
+            inflight.add(key)
+
+        def fetch() -> tuple[Any, str | None]:
+            try:
+                quote = broker.get_quote(symbol)
+                entry = (time.time(), quote, None)
+            except Exception as exc:
+                # Failures are memoised too, and that is the point: a missing
+                # market-data subscription must not cost a retry storm per poll.
+                entry = (time.time(), None, str(exc))
+            with self._quote_memo_lock:
+                inflight.discard(key)
+                memo[key] = entry   # a pre-rebuild memo is simply dropped
+            return entry[1], entry[2]
+
+        if cached is None:
+            return fetch()
+        # Stale: show the last quote now and refresh it in the background, so
+        # a broker whose market data is failing (Schwab 500s retry for many
+        # seconds) cannot hold up the whole dashboard.
+        threading.Thread(target=fetch, name=f"quote-{key}", daemon=True).start()
+        return cached[1], cached[2]
 
     # --- status -----------------------------------------------------------
 

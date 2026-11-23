@@ -34,3 +34,29 @@ def test_holdings_is_retaken_after_a_mid_read_rebuild(service, settings):
     holdings = service.holdings()
     assert calls["n"] == 1
     assert all(b["error"] is None for b in holdings["brokers"].values())
+
+
+def test_a_slow_quote_never_blocks_a_dashboard_read(service):
+    """Once a quote is known, a stale one is shown while a fresh one loads."""
+    import threading
+    import time
+
+    broker = service.brokers["schwab"]
+    first, _ = service.display_quote(broker, "QQQ")
+    assert first is not None
+
+    release = threading.Event()
+    real = broker.get_quote
+
+    def slow(symbol):
+        release.wait(5)
+        return real(symbol)
+
+    broker.get_quote = slow
+    service.settings = service.settings.__class__(
+        **{**service.settings.__dict__, "quote_display_ttl_seconds": 0.0})
+    started = time.monotonic()
+    quote, error = service.display_quote(broker, "QQQ")
+    assert time.monotonic() - started < 0.5
+    assert quote is first and error is None
+    release.set()

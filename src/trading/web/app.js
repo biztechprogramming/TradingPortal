@@ -1755,13 +1755,15 @@ function channelPrices(sym, side) {
  */
 function pickPrices(title, intro, legs) {
   const tick = orderTick();
-  const defaults = {};
-  for (const leg of legs) {
-    const q = pickQuote(leg.sym);
+  // A leg follows the market (its price box tracks the bid) until you touch
+  // it: type, step, or click a chip or rung.
+  const touched = new Set();
+  const marketDefault = (sym) => {
+    const q = pickQuote(sym);
     const start = q.bid || q.last;
-    defaults[leg.sym] = start ? snapToTick(start, tick) : 0;
-  }
-  const legHtml = legs.map((leg) => {
+    return start ? snapToTick(start, tick) : 0;
+  };
+  const marketHtml = (leg) => {
     const q = pickQuote(leg.sym);
     const mid = q.bid > 0 && q.ask > 0 ? (q.bid + q.ask) / 2 : 0;
     const chip = (label, price) => price > 0
@@ -1774,19 +1776,20 @@ function pickPrices(title, intro, legs) {
          <span class="rung-label">${esc(c.label)}</span>
          ${c.anchor ? '<span class="pill pill-anchor">LEVEL</span>' : ''}
        </button>`).join('');
-    return `<div class="pick-leg">
+    return `<div class="pick-chips">${chip('Bid', q.bid)}${chip('Mid', mid)}${chip('Ask', q.ask)}${chip('Last', q.last)}</div>
+      <div class="order-hint pick-hint" id="pick-hint-${esc(leg.sym)}"></div>
+      ${rungs ? `<div class="pick-rungs">${rungs}</div>` : ''}`;
+  };
+  const legHtml = legs.map((leg) => `<div class="pick-leg">
       <div class="pick-head"><strong>${esc(leg.title)}</strong></div>
       <div class="order-row">
         <button class="small pick-step" data-sym="${esc(leg.sym)}" data-dir="-1" title="Down one tick">−</button>
         <input class="pick-input" data-sym="${esc(leg.sym)}" inputmode="decimal"
-          autocomplete="off" value="${fmtTick(defaults[leg.sym])}">
+          autocomplete="off" value="${fmtTick(marketDefault(leg.sym))}">
         <button class="small pick-step" data-sym="${esc(leg.sym)}" data-dir="1" title="Up one tick">+</button>
       </div>
-      <div class="pick-chips">${chip('Bid', q.bid)}${chip('Mid', mid)}${chip('Ask', q.ask)}${chip('Last', q.last)}</div>
-      <div class="order-hint pick-hint" id="pick-hint-${esc(leg.sym)}"></div>
-      ${rungs ? `<div class="pick-rungs">${rungs}</div>` : ''}
-    </div>`;
-  }).join('');
+      <div class="pick-market" data-sym="${esc(leg.sym)}">${marketHtml(leg)}</div>
+    </div>`).join('');
 
   return new Promise((resolve) => {
     const box = $('modal').querySelector('.modal-box');
@@ -1794,6 +1797,7 @@ function pickPrices(title, intro, legs) {
     box?.classList.add('modal-wide');
     $('modal-title').textContent = title;
     $('modal-body').innerHTML = `<p class="muted">${intro}</p>${legHtml}
+      <div class="muted pick-age" id="pick-age"></div>
       <div id="limit-error" class="trading-msg"></div>`;
     $('modal').classList.remove('hidden');
 
@@ -1825,17 +1829,58 @@ function pickPrices(title, intro, legs) {
         `${leg.side === 'BUY' ? 'Buy' : 'Sell'} ${leg.sym} ${prices[leg.sym] > 0 ? '@ ' + fmtTick(prices[leg.sym]) : ''}`)
         .join(' · ');
     };
-    const set = (sym, price) => { input(sym).value = fmtTick(snapToTick(price, tick)); update(); };
+    const set = (sym, price) => {
+      touched.add(sym);
+      input(sym).value = fmtTick(snapToTick(price, tick));
+      update();
+    };
     const step = (sym, dir) => {
-      const cur = Number(input(sym).value) || defaults[sym];
+      const cur = Number(input(sym).value) || marketDefault(sym);
       if (cur) set(sym, cur + dir * tick);
     };
+    // Re-draw quotes, chips and rungs from fresh data while the box is open.
+    const redraw = () => {
+      for (const leg of legs) {
+        const pane = $('modal-body').querySelector(`.pick-market[data-sym="${CSS.escape(leg.sym)}"]`);
+        if (pane) pane.innerHTML = marketHtml(leg);
+        if (!touched.has(leg.sym)) {
+          const p = marketDefault(leg.sym);
+          const el = input(leg.sym);
+          const allSelected = document.activeElement === el
+            && el.selectionStart === 0 && el.selectionEnd === el.value.length;
+          if (p) el.value = fmtTick(p);
+          if (allSelected) el.select();   // typing still replaces the price
+        }
+      }
+      const at = window.__lastLadder?.generated_at;
+      $('pick-age').textContent = at
+        ? `Quotes as of ${new Date(at * 1000).toLocaleTimeString()} · updating every 2s` : '';
+      update();
+    };
+    let live = true;
+    let polling = false;
+    const poll = async () => {
+      if (!live || polling) return;
+      polling = true;
+      try {
+        const res = await api('/api/ladder');
+        if (live && res.status === 200 && res.body) {
+          window.__lastLadder = res.body;
+          redraw();
+        }
+      } catch { /* keep the last prices; the next tick retries */ }
+      polling = false;
+    };
+    const timer = setInterval(poll, 2000);
     const close = (value) => {
+      live = false;
+      clearInterval(timer);
       $('modal').classList.add('hidden');
       box?.classList.remove('modal-wide');
       $('modal-confirm').textContent = confirmText;
       $('modal-confirm').onclick = null;
       $('modal-cancel').onclick = null;
+      $('modal-body').onclick = null;
       resolve(value);
     };
     const submit = () => {
@@ -1845,14 +1890,15 @@ function pickPrices(title, intro, legs) {
       close(prices);
     };
 
-    for (const el of $('modal-body').querySelectorAll('.pick-chip, .pick-rung')) {
-      el.addEventListener('click', () => set(el.dataset.sym, Number(el.dataset.price)));
-    }
-    for (const el of $('modal-body').querySelectorAll('.pick-step')) {
-      el.addEventListener('click', () => step(el.dataset.sym, Number(el.dataset.dir)));
-    }
+    // Delegated, because the chips and rungs are re-drawn on every poll.
+    $('modal-body').onclick = (e) => {
+      const pick = e.target.closest('.pick-chip, .pick-rung');
+      if (pick) { set(pick.dataset.sym, Number(pick.dataset.price)); return; }
+      const stepBtn = e.target.closest('.pick-step');
+      if (stepBtn) step(stepBtn.dataset.sym, Number(stepBtn.dataset.dir));
+    };
     for (const el of $('modal-body').querySelectorAll('.pick-input')) {
-      el.addEventListener('input', update);
+      el.addEventListener('input', () => { touched.add(el.dataset.sym); update(); });
       el.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') submit();
         else if (e.key === 'Escape') close(null);
@@ -1862,7 +1908,7 @@ function pickPrices(title, intro, legs) {
     }
     $('modal-confirm').onclick = submit;
     $('modal-cancel').onclick = () => close(null);
-    update();
+    redraw();
     const first = $('modal-body').querySelector('.pick-input');
     first?.focus();
     first?.select();

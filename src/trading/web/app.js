@@ -86,6 +86,9 @@ async function checkVersion() {
     if (assetVersion === null) { assetVersion = stamp; return; }
     if (stamp !== assetVersion) {
       console.info('dashboard assets changed; reloading');
+      // The page fills in asynchronously, so the browser's own scroll
+      // restoration lands at the top. Carry the position across ourselves.
+      try { sessionStorage.setItem('reload-scroll', String(window.scrollY)); } catch { /* storage off */ }
       window.location.reload();
     }
   } catch (err) {
@@ -540,7 +543,7 @@ function renderLadder(ladder) {
       else if (e.key === 'ArrowDown') { e.preventDefault(); stepPrice(sym, -1); }
     });
     if (sym === focusSym) {
-      input.focus();
+      input.focus({ preventScroll: true });
       if (caret !== null) input.setSelectionRange(caret, caret);
     }
   }
@@ -802,6 +805,24 @@ async function refreshCandles(refresh = true) {
   }
 }
 
+/** After an auto-reload, return to where the page was once content exists. */
+function restoreReloadScroll() {
+  let y = null;
+  try {
+    y = sessionStorage.getItem('reload-scroll');
+    sessionStorage.removeItem('reload-scroll');
+  } catch { /* storage off */ }
+  if (y !== null) window.scrollTo(0, Number(y) || 0);
+}
+
+/** Run a DOM rebuild without moving the page's scroll position. */
+function keepPageScroll(fn) {
+  const x = window.scrollX;
+  const y = window.scrollY;
+  fn();
+  if (window.scrollX !== x || window.scrollY !== y) window.scrollTo(x, y);
+}
+
 function renderCandles() {
   const symbols = candleSymbols();
   const host = $('candles');
@@ -827,8 +848,15 @@ function renderCandles() {
       ${candleChart(sym, data)}
     </div>`;
   }).join('');
-  host.innerHTML = charts;
+  // The full-screen block scrolls on its own; rebuilding it would reset
+  // that scroll to the top on every 60s refresh.
+  const prev = host.querySelector('.candle-expanded');
+  const prevSym = prev?.dataset.block;
+  const prevTop = prev?.scrollTop ?? 0;
+  keepPageScroll(() => { host.innerHTML = charts; });
   host.classList.toggle('has-expanded', expandedSymbol !== null);
+  const next = host.querySelector('.candle-expanded');
+  if (next && next.dataset.block === prevSym) next.scrollTop = prevTop;
 
   for (const btn of host.querySelectorAll('.expand-btn')) {
     btn.addEventListener('click', (e) => {
@@ -1446,6 +1474,8 @@ async function refresh() {
     ]);
     const s = status.body;
     window.__lastStatus = s;
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
     renderBanner(s);
     renderCombined(s.combined || {});
     renderSpreadControl(s.config || {});
@@ -1489,6 +1519,12 @@ async function refresh() {
       alerts.push({ level: 'warn', html: esc(w) });
     }
     setAlerts(alerts);
+    // Re-rendered sections can briefly change height; put the page back
+    // exactly where the user had it.
+    if (window.scrollX !== scrollX || window.scrollY !== scrollY) {
+      window.scrollTo(scrollX, scrollY);
+    }
+    restoreReloadScroll();
   } catch (err) {
     console.error(err);
   }

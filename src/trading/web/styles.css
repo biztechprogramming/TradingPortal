@@ -417,8 +417,17 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .sub-note { font-size: 11.5px; color: var(--muted); margin: 8px 0 0; }
 
 /* --- candles ------------------------------------------------------------ */
-.range-picker { display: flex; gap: 4px; }
-.range-btn { padding: 4px 10px; font-size: 12px; }
+.range-picker { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.range-btn, .interval-btn, .keltner-btn { padding: 4px 10px; font-size: 12px; }
+.range-sep { width: 8px; }
+
+/* Keltner channel: amber, so it never reads as an up/down candle colour. */
+.keltner { fill: none; stroke: var(--amber); stroke-width: 1.2; }
+.keltner-mid { stroke-dasharray: 4 3; opacity: .75; }
+.keltner-key {
+  display: inline-block; width: 14px; height: 0; vertical-align: 3px;
+  border-top: 2px solid var(--amber);
+}
 .range-on { background: var(--blue); border-color: var(--blue); color: #04121f; }
 
 .candle-block + .candle-block { margin-top: 22px; }

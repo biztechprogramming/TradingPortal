@@ -767,23 +767,106 @@ const RANGES = [
   { label: '5D', days: 5 },
   { label: '1M', days: 30 },
   { label: '3M', days: 90 },
+  { label: '6M', days: 182 },
+  { label: '1Y', days: 365 },
+  { label: '2Y', days: 730 },
+  { label: '5Y', days: 1826 },
+  { label: 'MAX', days: 11000 },
 ];
-let rangeDays = 5;
+const INTERVALS = [{ label: '1H', value: '1h' }, { label: '4H', value: '4h' }];
+//: Most candles drawn at once; past this a candle is under a pixel wide.
+const MAX_DRAWN_BARS = 5000;
+//: Keltner channel: EMA of close, plus/minus a multiple of ATR.
+const KELTNER = { emaLength: 20, atrLength: 10, multiplier: 2 };
+
+const stored = (key, fallback) => {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+};
+const store = (key, value) => {
+  try { localStorage.setItem(key, value); } catch { /* storage off */ }
+};
+let rangeDays = Number(stored('chart-range-days', 5)) || 5;
+let barSize = stored('chart-bar-size', '1h') === '4h' ? '4h' : '1h';
+let showKeltner = stored('chart-keltner', 'on') !== 'off';
 let candleData = {};
 let expandedSymbol = null;
 let chartSymbols = null;
 
 function renderRangePicker() {
-  $('range-picker').innerHTML = RANGES.map((r) =>
-    `<button class="small range-btn ${r.days === rangeDays ? 'range-on' : ''}"
-       data-days="${r.days}">${r.label}</button>`).join('');
+  const button = (cls, attr, on, label) =>
+    `<button class="small ${cls} ${on ? 'range-on' : ''}" ${attr}>${label}</button>`;
+  $('range-picker').innerHTML =
+    INTERVALS.map((i) => button('interval-btn', `data-bar-size="${i.value}"`,
+      i.value === barSize, i.label)).join('')
+    + '<span class="range-sep"></span>'
+    + RANGES.map((r) => button('range-btn', `data-days="${r.days}"`,
+      r.days === rangeDays, r.label)).join('')
+    + '<span class="range-sep"></span>'
+    + button('keltner-btn', 'title="Keltner channels: EMA 20 ± 2 × ATR 10"',
+      showKeltner, `Keltner ${showKeltner ? 'on' : 'off'}`);
   for (const btn of document.querySelectorAll('.range-btn')) {
     btn.addEventListener('click', (e) => {
       rangeDays = Number(e.currentTarget.dataset.days);
+      store('chart-range-days', rangeDays);
       renderRangePicker();
       renderCandles();
+      refreshCandles(false);   // loads older bars from the cache if needed
     });
   }
+  for (const btn of document.querySelectorAll('.interval-btn')) {
+    btn.addEventListener('click', (e) => {
+      barSize = e.currentTarget.dataset.barSize;
+      store('chart-bar-size', barSize);
+      renderRangePicker();
+      refreshCandles(false);
+    });
+  }
+  document.querySelector('.keltner-btn')?.addEventListener('click', () => {
+    showKeltner = !showKeltner;
+    store('chart-keltner', showKeltner ? 'on' : 'off');
+    renderRangePicker();
+    renderCandles();
+  });
+}
+
+/** Days to load: the range plus enough earlier bars to warm Keltner up. */
+const loadDays = () => Math.min(12000, rangeDays + (barSize === '4h' ? 20 : 6));
+
+/** The bars drawn for a symbol: in range, at most MAX_DRAWN_BARS, newest. */
+function visibleBars(symbol) {
+  const data = candleData[symbol];
+  if (!data || data.bar_size !== barSize) return { all: [], from: 0 };
+  const all = data.bars || [];
+  const cutoff = Date.now() / 1000 - rangeDays * 86400;
+  let from = all.findIndex((b) => b[0] >= cutoff);
+  if (from < 0) from = all.length;
+  from = Math.max(from, all.length - MAX_DRAWN_BARS);
+  return { all, from };
+}
+
+/** {mid, upper, lower} per bar, null until there is enough history. */
+function keltner(bars) {
+  const { emaLength, atrLength, multiplier } = KELTNER;
+  const out = [];
+  const k = 2 / (emaLength + 1);
+  let ema = null;
+  let atr = null;
+  let trSum = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const [, , h, l, c] = bars[i];
+    const prevClose = i ? bars[i - 1][4] : c;
+    const tr = Math.max(h - l, Math.abs(h - prevClose), Math.abs(l - prevClose));
+    ema = ema === null ? c : c * k + ema * (1 - k);
+    if (i < atrLength) {
+      trSum += tr;
+      if (i === atrLength - 1) atr = trSum / atrLength;
+    } else {
+      atr = (atr * (atrLength - 1) + tr) / atrLength;   // Wilder's smoothing
+    }
+    out.push(atr === null || i < emaLength - 1 ? null
+      : { mid: ema, upper: ema + multiplier * atr, lower: ema - multiplier * atr });
+  }
+  return out;
 }
 
 function candleSymbols() {
@@ -797,13 +880,22 @@ async function refreshCandles(refresh = true) {
   try {
     const results = await Promise.all(
       candleSymbols().map((sym) =>
-        api(`/api/candles?symbol=${encodeURIComponent(sym)}&refresh=${refresh}`)
+        api(`/api/candles?symbol=${encodeURIComponent(sym)}&refresh=${refresh}`
+          + `&bar_size=${barSize}&days=${loadDays()}`)
           .then((r) => [sym, r.body])
           .catch(() => [sym, null])),
     );
-    for (const [sym, body] of results) if (body) candleData[sym] = body;
-    const days = Object.values(candleData)[0]?.days;
-    if (days) $('candle-days').textContent = days;
+    // A reply for an interval or range the user has since left is dropped.
+    for (const [sym, body] of results) {
+      if (body && body.bar_size === barSize) candleData[sym] = body;
+    }
+    const first = Object.values(candleData)[0];
+    if (first) {
+      $('candle-days').textContent = first.history_oldest
+        ? `back to ${new Date(first.history_oldest * 1000).toLocaleDateString()}`
+          + (first.history_complete ? '' : ' (still downloading older history)')
+        : '';
+    }
     renderCandles();
   } catch (err) {
     console.error(err);
@@ -883,12 +975,14 @@ document.addEventListener('keydown', (e) => {
 
 /** Candlestick SVG for one symbol over the selected range. */
 function candleChart(symbol, data) {
-  const cutoff = Date.now() / 1000 - rangeDays * 86400;
-  const bars = (data.bars || []).filter((b) => b[0] >= cutoff);
+  const { all, from } = visibleBars(symbol);
+  const bars = all.slice(from);
   if (bars.length < 2) {
-    return '<div class="muted" style="padding:20px 0">Not enough cached data '
-      + 'for this range yet.</div>';
+    return '<div class="muted" style="padding:20px 0">'
+      + (data.bar_size !== barSize ? 'loading…' : 'Not enough cached data for this range yet.')
+      + '</div>';
   }
+  const bands = showKeltner ? keltner(all).slice(from) : [];
 
   // A taller viewBox when expanded: the SVG stretches to its container, so
   // more height here buys real vertical resolution rather than a scale-up.
@@ -898,8 +992,12 @@ function candleChart(symbol, data) {
   const plotW = W - M.left - M.right;
   const plotH = H - M.top - M.bottom;
 
-  let lo = Math.min(...bars.map((b) => b[3]));
-  let hi = Math.max(...bars.map((b) => b[2]));
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const b of bars) { if (b[3] < lo) lo = b[3]; if (b[2] > hi) hi = b[2]; }
+  for (const k of bands) {
+    if (k) { if (k.lower < lo) lo = k.lower; if (k.upper > hi) hi = k.upper; }
+  }
   const pad = Math.max((hi - lo) * 0.06, 0.01);
   lo -= pad; hi += pad;
 
@@ -923,13 +1021,13 @@ function candleChart(symbol, data) {
   // Extended-hours bars are in the data but look identical to regular ones
   // without this, which reads as "extended hours are missing".
   const extended = bars.map((b) => !isRegularSession(b[0]));
-  const bands = [];
+  const sessionBands = [];
   let runStart = null;
   for (let i = 0; i <= bars.length; i++) {
     if (i < bars.length && extended[i]) {
       if (runStart === null) runStart = i;
     } else if (runStart !== null) {
-      bands.push(`<rect class="session-band" x="${(M.left + slot * runStart).toFixed(2)}"
+      sessionBands.push(`<rect class="session-band" x="${(M.left + slot * runStart).toFixed(2)}"
         y="${M.top}" width="${(slot * (i - runStart)).toFixed(2)}"
         height="${plotH}"/>`);
       runStart = null;
@@ -953,15 +1051,34 @@ function candleChart(symbol, data) {
         width="${bodyW.toFixed(2)}" height="${height.toFixed(2)}"/>`;
   }).join('');
 
+  const kLine = (pick, cls) => {
+    let d = '';
+    bands.forEach((k, i) => {
+      if (!k) return;
+      d += `${d ? 'L' : 'M'}${cx(i).toFixed(1)},${py(pick(k)).toFixed(1)}`;
+    });
+    return d ? `<path class="${cls}" vector-effect="non-scaling-stroke" d="${d}"/>` : '';
+  };
+  const keltnerSvg = showKeltner
+    ? kLine((k) => k.upper, 'keltner keltner-edge')
+      + kLine((k) => k.mid, 'keltner keltner-mid')
+      + kLine((k) => k.lower, 'keltner keltner-edge')
+    : '';
+
   const first = new Date(bars[0][0] * 1000);
   const last = new Date(bars[bars.length - 1][0] * 1000);
-  const stamp = (d) => d.toLocaleString('en-US',
-    { month: 'short', day: 'numeric', hour: 'numeric' });
+  const long = rangeDays > 300;
+  const stamp = (d) => d.toLocaleString('en-US', long
+    ? { year: 'numeric', month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric', hour: 'numeric' });
+  const capped = from > 0 && all.length - from >= MAX_DRAWN_BARS
+    ? ` · showing the newest ${MAX_DRAWN_BARS} bars${barSize === '1h' ? ' (4H shows further back)' : ''}`
+    : '';
 
   return `<figure class="chart-figure candle-figure" data-symbol="${esc(symbol)}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
-        aria-label="${esc(symbol)} hourly candles">
-      ${bands.join('')}${grid}${candles}
+        aria-label="${esc(symbol)} ${barSize} candles">
+      ${sessionBands.join('')}${grid}${candles}${keltnerSvg}
       <line class="crosshair candle-cross" y1="${M.top}" y2="${M.top + plotH}"
         style="display:none"/>
       <rect class="candle-hit" x="${M.left}" y="${M.top}" width="${plotW}"
@@ -969,7 +1086,8 @@ function candleChart(symbol, data) {
     </svg>
     <div class="chart-tip candle-tip" style="display:none"></div>
     <figcaption class="muted">${esc(stamp(first))} → ${esc(stamp(last))}
-      · ${bars.length} × ${esc(data.bar_size || '1h')} bars
+      · ${bars.length} × ${esc(data.bar_size || '1h')} bars${capped}
+      ${showKeltner ? `· <span class="keltner-key"></span> Keltner ${KELTNER.emaLength}, ${KELTNER.multiplier}×ATR ${KELTNER.atrLength}` : ''}
       · <span class="band-key"></span> ${extendedCount} extended-hours
       (${bars.length - extendedCount} regular session)</figcaption>
   </figure>`;
@@ -984,9 +1102,10 @@ function attachCandleCrosshair(symbol) {
   const tip = fig.querySelector('.candle-tip');
   if (!svg || !hit) return;
 
-  const cutoff = Date.now() / 1000 - rangeDays * 86400;
-  const bars = (candleData[symbol]?.bars || []).filter((b) => b[0] >= cutoff);
+  const { all, from } = visibleBars(symbol);
+  const bars = all.slice(from);
   if (!bars.length) return;
+  const bands = showKeltner ? keltner(all).slice(from) : [];
   const W = 1000, M = { left: 8, right: 58 };   // must match candleChart
   const plotW = W - M.left - M.right;
   const slot = plotW / bars.length;
@@ -1004,13 +1123,15 @@ function attachCandleCrosshair(symbol) {
     line.setAttribute('x1', x); line.setAttribute('x2', x);
     line.style.display = '';
     const when = new Date(ts * 1000).toLocaleString('en-US',
-      { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     tip.innerHTML = `<div class="tip-date">${esc(when)}</div>
       <div class="tip-row"><span>O</span><span class="tip-value">${o.toFixed(2)}</span></div>
       <div class="tip-row"><span>H</span><span class="tip-value">${h.toFixed(2)}</span></div>
       <div class="tip-row"><span>L</span><span class="tip-value">${l.toFixed(2)}</span></div>
       <div class="tip-row"><span>C</span><span class="tip-value">${c.toFixed(2)}</span></div>
-      <div class="tip-row"><span>Vol</span><span class="tip-value">${fmtNum(v)}</span></div>`;
+      <div class="tip-row"><span>Vol</span><span class="tip-value">${fmtNum(v)}</span></div>`
+      + (bands[i] ? `<div class="tip-row"><span>KC</span><span class="tip-value">${
+        bands[i].lower.toFixed(2)} · ${bands[i].mid.toFixed(2)} · ${bands[i].upper.toFixed(2)}</span></div>` : '');
     tip.style.display = '';
     const left = (x / W) * box.width;
     tip.style.left = `${Math.min(Math.max(left + 12, 0), box.width - tip.offsetWidth - 4)}px`;

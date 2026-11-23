@@ -89,14 +89,14 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>Hourly candles</h2>
+      <h2>Candles</h2>
       <div class="range-picker" id="range-picker"></div>
     </div>
     <p class="chart-caption">
-      One-hour bars including extended hours, cached locally and kept for
-      <span id="candle-days">90</span> days. Only the last couple of hours are
-      re-fetched on a refresh — closed bars never change, so they are served
-      from the cache.
+      1-hour or 4-hour bars including extended hours, cached locally
+      <span id="candle-days"></span>. Full hourly history is downloaded from
+      IBKR in the background; only the last couple of hours are re-fetched on
+      a refresh.
     </p>
     <div id="candles" class="candles-host"><div class="muted">loading…</div></div>
   </section>

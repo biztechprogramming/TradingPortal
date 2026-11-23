@@ -138,6 +138,7 @@ class TradingService:
         for warning in self.environment_warnings:
             log.warning("%s", warning)
         self.health.start()
+        self.start_history_backfill()
         return errors
 
     def rebuild_brokers(self) -> dict[str, str | None]:
@@ -507,13 +508,61 @@ class TradingService:
     # --- candles ----------------------------------------------------------
 
     def candle_series(
-        self, symbol: str, days: int | None = None, refresh: bool = True
+        self, symbol: str, days: int | None = None, refresh: bool = True,
+        bar_size: str | None = None,
     ) -> dict[str, Any]:
-        """Cached hourly bars for one symbol, refreshing only the recent edge."""
+        """Cached bars for one symbol, refreshing only the recent edge."""
         # Read-only accounts are perfectly good sources of market data, so
         # unlike order routing this uses every connected broker.
         brokers = list(self.brokers.values())
-        return self.candles.series(brokers, symbol, days=days, refresh=refresh)
+        return self.candles.series(brokers, symbol, days=days, refresh=refresh,
+                                   bar_size=bar_size)
+
+    #: IBKR allows 60 historical requests per 10 minutes; stay well under.
+    HISTORY_PAUSE_SECONDS = 12.0
+
+    def start_history_backfill(self) -> None:
+        """Pull all available hourly history in the background, once.
+
+        A year per request, oldest cached bar backward, until IBKR has
+        nothing older. Resumes after a restart; idle once every chart symbol
+        is complete.
+        """
+        if getattr(self, "_history_thread", None) is not None:
+            return
+
+        def run() -> None:
+            symbols = list(dict.fromkeys(s.upper() for s in self.settings.chart_symbols))
+            pending = set(symbols)
+            failures: dict[str, int] = {}
+            while pending:
+                progressed = False
+                for symbol in symbols:
+                    if symbol not in pending:
+                        continue
+                    try:
+                        state = self.candles.backfill_history(
+                            list(self.brokers.values()), symbol)
+                    except Exception as exc:
+                        failures[symbol] = failures.get(symbol, 0) + 1
+                        log.info("history backfill for %s failed (%d): %s",
+                                 symbol, failures[symbol], exc)
+                        if failures[symbol] >= 5:
+                            pending.discard(symbol)   # retried next restart
+                        continue
+                    failures.pop(symbol, None)
+                    if state == "done":
+                        pending.discard(symbol)
+                    elif state == "more":
+                        progressed = True
+                        time.sleep(self.HISTORY_PAUSE_SECONDS)
+                if not progressed and pending:
+                    time.sleep(300)   # no IBKR right now; try again later
+            log.info("hourly history backfill complete for %s", ", ".join(symbols))
+
+        self._history_thread = threading.Thread(
+            target=run, name="history-backfill", daemon=True)
+        self._history_thread.start()
 
     #: Broker order history changes rarely; the dashboard polls every 10s.
     FILLS_TTL_SECONDS = 60.0

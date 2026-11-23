@@ -368,8 +368,9 @@ def create_app(
     @app.get("/api/candles", dependencies=[Auth])
     def get_candles(
         symbol: str = Query(..., description="Traded symbol, e.g. QQQ"),
-        days: int = Query(0, ge=0, le=365, description="0 uses CANDLE_DAYS"),
+        days: int = Query(0, ge=0, le=12000, description="0 uses CANDLE_DAYS"),
         refresh: bool = Query(True),
+        bar_size: str = Query("1h", pattern="^(1h|4h)$"),
     ) -> dict[str, Any]:
         sym = symbol.upper().strip()
         # Charts cover the reference symbols too; trading does not. The order
@@ -380,7 +381,8 @@ def create_app(
                 detail=f"symbol {symbol!r} is not tracked; only "
                        f"{sorted(settings.chart_symbols)} are available",
             )
-        return service.candle_series(sym, days=days or None, refresh=refresh)
+        return service.candle_series(sym, days=days or None, refresh=refresh,
+                                     bar_size=bar_size)
 
     @app.get("/api/ladder", dependencies=[Auth])
     def get_ladder() -> dict[str, Any]:

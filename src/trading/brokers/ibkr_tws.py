@@ -381,6 +381,51 @@ class IBKRTwsBroker(Broker):
                                 close=float(raw.close), volume=float(raw.volume or 0)))
         return sorted(bars, key=lambda b: b.ts)
 
+    def history_chunk(
+        self, symbol: str, end: float, *, bar_size: str = "1h",
+        outside_rth: bool = True,
+    ) -> list[Bar]:
+        """Up to one year of bars ending at ``end``, for deep backfill.
+
+        Unlike :meth:`get_price_bars` this raises on failure, so the caller
+        can tell "IBKR had nothing that far back" from "IBKR did not answer".
+        IBKR keeps hourly bars back to 1999 for QQQ.
+        """
+        setting = BAR_SIZES[bar_size]
+        contract = self._history_contract(symbol)
+        stamp = datetime.fromtimestamp(end, timezone.utc).strftime("%Y%m%d-%H:%M:%S")
+        rows = self._call(lambda ib: ib.reqHistoricalDataAsync(
+            contract, stamp, "1 Y", setting, "TRADES", not outside_rth,
+            formatDate=2, timeout=90), timeout=100)
+        bars: list[Bar] = []
+        for raw in rows or []:
+            ts = int(_epoch(raw.date) if isinstance(raw.date, datetime)
+                     else datetime(raw.date.year, raw.date.month, raw.date.day,
+                                   tzinfo=timezone.utc).timestamp())
+            if ts < end:
+                bars.append(Bar(symbol=symbol.upper(), ts=ts, open=float(raw.open),
+                                high=float(raw.high), low=float(raw.low),
+                                close=float(raw.close), volume=float(raw.volume or 0)))
+        return sorted(bars, key=lambda b: b.ts)
+
+    #: Chart-only reference symbols that are indexes, not stocks.
+    INDEXES = {"NDX": "NASDAQ", "SPX": "CBOE", "VIX": "CBOE", "DJX": "CBOE"}
+
+    def _history_contract(self, symbol: str) -> Any:
+        symbol = symbol.upper()
+        exchange = self.INDEXES.get(symbol)
+        if exchange is None:
+            return self._contract(symbol)
+        key = f"IND:{symbol}"
+        if key not in self._contracts:
+            from ib_async import Index
+            qualified = self._call(
+                lambda ib: ib.qualifyContractsAsync(Index(symbol, exchange, "USD")))
+            if not qualified or not getattr(qualified[0], "conId", 0):
+                raise ConfigError(f"IB Gateway could not identify index {symbol}")
+            self._contracts[key] = qualified[0]
+        return self._contracts[key]
+
     # --- orders -----------------------------------------------------------
 
     def _to_order(self, trade: Any) -> Order:

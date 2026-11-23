@@ -30,7 +30,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 from .models import Bar
 
@@ -104,9 +106,53 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE fetched_ranges ADD COLUMN bar_size TEXT NOT NULL DEFAULT '1h';
         """,
     ),
+    (
+        4,
+        """
+        -- Deep history is backfilled a year at a time, oldest-first gaps
+        -- excepted. Once a source has nothing older, the series is marked
+        -- complete so the backfill never asks again.
+        CREATE TABLE IF NOT EXISTS history_done (
+            symbol   TEXT NOT NULL,
+            bar_size TEXT NOT NULL,
+            done_at  REAL NOT NULL,
+            PRIMARY KEY (symbol, bar_size)
+        );
+        """,
+    ),
 ]
 
 HOUR = 3600
+ET = ZoneInfo("America/New_York")
+
+#: Bar sizes built from stored hourly bars rather than fetched.
+DERIVED = {"4h": ("1h", 4)}
+
+
+def aggregate(bars: Sequence[Bar], hours: int) -> list[Bar]:
+    """Roll hourly bars up into ``hours``-hour bars.
+
+    Buckets are aligned to the Eastern clock (04:00, 08:00, 12:00, 16:00,
+    20:00 for 4h), so a 4h bar never straddles two trading days and the
+    extended-hours session splits the way chart platforms show it.
+    """
+    out: list[Bar] = []
+    key = None
+    for bar in bars:
+        local = datetime.fromtimestamp(bar.ts, ET)
+        start = local.replace(hour=local.hour // hours * hours, minute=0,
+                              second=0, microsecond=0)
+        k = int(start.timestamp())
+        if k != key:
+            out.append(Bar(symbol=bar.symbol, ts=k, open=bar.open, high=bar.high,
+                           low=bar.low, close=bar.close, volume=bar.volume))
+            key = k
+        else:
+            last = out[-1]
+            out[-1] = Bar(symbol=last.symbol, ts=last.ts, open=last.open,
+                          high=max(last.high, bar.high), low=min(last.low, bar.low),
+                          close=bar.close, volume=last.volume + bar.volume)
+    return out
 
 
 class CandleStore:
@@ -241,6 +287,21 @@ class CandleStore:
             )
             self._db.commit()
             return cursor.rowcount or 0
+
+    def history_complete(self, symbol: str, bar_size: str = "1h") -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM history_done WHERE symbol = ? AND bar_size = ?",
+                (symbol.upper(), bar_size),
+            ).fetchone()
+        return row is not None
+
+    def mark_history_complete(self, symbol: str, bar_size: str = "1h") -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO history_done (symbol, bar_size, done_at)"
+                " VALUES (?, ?, ?)", (symbol.upper(), bar_size, time.time()))
+            self._db.commit()
 
     def coverage(self, symbol: str,
                  bar_size: str = "1h") -> tuple[int | None, int | None, int]:
@@ -401,20 +462,73 @@ class CandleService:
         days: int | None = None,
         refresh: bool = True,
         bar_size: str | None = None,
+        max_bars: int = 6000,
     ) -> dict[str, Any]:
         bar_size = bar_size or self.settings.candle_bar_size
         days = days or self.settings.candle_days
+        stored, per = DERIVED.get(bar_size, (bar_size, 1))
         meta: dict[str, Any] = {}
         if refresh:
-            meta = self.refresh(brokers, symbol, days, bar_size)
+            # Only the recent window is kept fresh here; anything older is
+            # the deep backfill's job, so a long chart never triggers a huge
+            # fetch on every refresh.
+            meta = self.refresh(brokers, symbol,
+                                min(days, self.settings.candle_days), stored)
         now = time.time()
-        bars = self.store.bars(symbol, now - days * 86400, now, bar_size)
+        bars = self.store.bars(symbol, now - days * 86400, now, stored)
+        if per > 1:
+            bars = aggregate(bars, per)
+        truncated = len(bars) > max_bars
+        if truncated:
+            bars = bars[-max_bars:]
+        oldest, _, _ = self.store.coverage(symbol, stored)
         return {
             "symbol": symbol.upper(),
             "bar_size": bar_size,
             "outside_rth": self.settings.candle_outside_rth,
             "days": days,
-            # [ts, o, h, l, c, v] per bar: ~1400 bars stay compact on the wire.
+            # [ts, o, h, l, c, v] per bar.
             "bars": [b.to_row() for b in bars],
+            "truncated": truncated,
+            "history_oldest": oldest,
+            "history_complete": self.store.history_complete(symbol, stored),
             "refresh": meta,
         }
+
+    def backfill_history(self, brokers: Sequence[Any], symbol: str,
+                         bar_size: str = "1h") -> str:
+        """Fetch one more year of history, older than anything cached.
+
+        Returns ``"done"`` once a source has nothing older, ``"more"`` after
+        a chunk was stored, or ``"no source"`` when no connected broker can
+        serve deep history (only IBKR can). Called repeatedly by a
+        background thread, so a restart simply resumes from the oldest bar.
+        """
+        if self.store.history_complete(symbol, bar_size):
+            return "done"
+        sources = [b for b in brokers
+                   if hasattr(b, "history_chunk") and b.connected]
+        if not sources:
+            return "no source"
+        oldest, _, _ = self.store.coverage(symbol, bar_size)
+        end = float(oldest) if oldest is not None else time.time()
+        last_exc: Exception | None = None
+        for broker in sources:
+            try:
+                bars = broker.history_chunk(
+                    symbol, end, bar_size=bar_size,
+                    outside_rth=self.settings.candle_outside_rth)
+            except Exception as exc:
+                last_exc = exc
+                continue
+            older = [b for b in bars if b.ts < end]
+            if not older:
+                self.store.mark_history_complete(symbol, bar_size)
+                log.info("%s %s history complete back to %s", symbol, bar_size,
+                         datetime.fromtimestamp(end, ET).date())
+                return "done"
+            self.store.upsert(older, source=broker.name, bar_size=bar_size)
+            log.info("%s %s history back to %s (+%d bars)", symbol, bar_size,
+                     datetime.fromtimestamp(older[0].ts, ET).date(), len(older))
+            return "more"
+        raise last_exc or RuntimeError("no history source answered")

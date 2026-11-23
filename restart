@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Restart the dashboard only. The IBKR gateway is left alone, so the IBKR
+# session stays logged in. Open orders and positions are never touched.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
+
+GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; OFF=$'\033[0m'
+STATE="$HERE/var/state"
+PIDFILE="$STATE/dashboard.pid"
+LOGFILE="$STATE/dashboard.log"
+mkdir -p "$STATE"
+
+# --- stop --------------------------------------------------------------------
+pid=""
+if [ -f "$PIDFILE" ]; then
+    pid="$(cat "$PIDFILE")"
+else
+    pid="$(pgrep -f "trading.cli.*serve" | head -1 || true)"
+fi
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+        echo "force-killed old dashboard (pid $pid)"
+    else
+        echo "stopped old dashboard (pid $pid)"
+    fi
+fi
+rm -f "$PIDFILE"
+
+# --- start -------------------------------------------------------------------
+nohup ./qqq serve >"$LOGFILE" 2>&1 &
+echo $! > "$PIDFILE"
+sleep 3
+if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    rm -f "$PIDFILE"
+    echo "${RED}dashboard failed to start.${OFF} Last lines of $LOGFILE:"
+    tail -15 "$LOGFILE"
+    exit 1
+fi
+echo "${GREEN}dashboard restarted${OFF} (pid $(cat "$PIDFILE"))"
+echo "  ${YELLOW}$(./url)${OFF}"

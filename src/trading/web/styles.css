@@ -475,6 +475,7 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 }
 .candle-block.candle-expanded .candle-figure svg { height: calc(100vh - 150px); }
 .candle-block.candle-expanded .sub-head { margin-top: 0; border-top: 0; }
+.candle-block.candle-expanded .range-picker { margin: 4px 0 10px; }
 
 /* --- logins ------------------------------------------------------------ */
 

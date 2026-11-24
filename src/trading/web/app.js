@@ -797,6 +797,7 @@ let showKeltner = stored('chart-keltner', 'on') !== 'off';
 let candleData = {};
 let expandedSymbol = null;
 let chartSymbols = null;
+const pickerHome = $('range-picker').parentElement;
 
 function renderRangePicker() {
   const button = (cls, attr, on, label) =>
@@ -959,9 +960,14 @@ function renderCandles() {
   const prev = host.querySelector('.candle-expanded');
   const prevSym = prev?.dataset.block;
   const prevTop = prev?.scrollTop ?? 0;
+  // The interval/range picker moves into the full-screen block so it stays
+  // usable there; take it back out first so the rebuild doesn't destroy it.
+  const picker = $('range-picker');
+  if (host.contains(picker)) pickerHome.appendChild(picker);
   keepPageScroll(() => { host.innerHTML = charts; });
   host.classList.toggle('has-expanded', expandedSymbol !== null);
   const next = host.querySelector('.candle-expanded');
+  if (next) next.querySelector('.sub-head').after(picker);
   if (next && next.dataset.block === prevSym) next.scrollTop = prevTop;
 
   for (const btn of host.querySelectorAll('.expand-btn')) {

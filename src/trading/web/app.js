@@ -1080,6 +1080,26 @@ function candleChart(symbol, data) {
       + kLine((k) => k.lower, 'keltner keltner-edge')
     : '';
 
+  // The latest band values as tags on the price axis, pushed apart so the
+  // three never overlap when the channel is narrow.
+  const kNow = bands.length ? bands[bands.length - 1] : null;
+  let keltnerTags = '';
+  if (kNow) {
+    const TAG_H = 13;
+    const tags = [['upper', kNow.upper], ['mid', kNow.mid], ['lower', kNow.lower]]
+      .map(([name, value]) => ({ name, value, y: py(value) }));
+    for (let i = 1; i < tags.length; i++) {
+      tags[i].y = Math.max(tags[i].y, tags[i - 1].y + TAG_H);
+    }
+    const overflow = tags[tags.length - 1].y - (M.top + plotH - TAG_H / 2);
+    if (overflow > 0) for (const t of tags) t.y -= overflow;
+    keltnerTags = tags.map((t) => `<g class="keltner-tag keltner-tag-${t.name}">
+        <rect x="${M.left + plotW + 1}" y="${(t.y - TAG_H / 2).toFixed(1)}"
+          width="${M.right - 2}" height="${TAG_H}" rx="2"/>
+        <text x="${M.left + plotW + 5}" y="${(t.y + 3.5).toFixed(1)}">${t.value.toFixed(2)}</text>
+      </g>`).join('');
+  }
+
   const first = new Date(bars[0][0] * 1000);
   const last = new Date(bars[bars.length - 1][0] * 1000);
   const long = rangeDays > 300;
@@ -1093,7 +1113,7 @@ function candleChart(symbol, data) {
   return `<figure class="chart-figure candle-figure" data-symbol="${esc(symbol)}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
         aria-label="${esc(symbol)} ${barSize} candles">
-      ${sessionBands.join('')}${grid}${candles}${keltnerSvg}
+      ${sessionBands.join('')}${grid}${candles}${keltnerSvg}${keltnerTags}
       <line class="crosshair candle-cross" y1="${M.top}" y2="${M.top + plotH}"
         style="display:none"/>
       <rect class="candle-hit" x="${M.left}" y="${M.top}" width="${plotW}"
@@ -1102,7 +1122,8 @@ function candleChart(symbol, data) {
     <div class="chart-tip candle-tip" style="display:none"></div>
     <figcaption class="muted">${esc(stamp(first))} → ${esc(stamp(last))}
       · ${bars.length} × ${esc(data.bar_size || '1h')} bars${capped}
-      ${showKeltner ? `· <span class="keltner-key"></span> Keltner ${KELTNER.emaLength}, ${KELTNER.multiplier}×ATR ${KELTNER.atrLength}` : ''}
+      ${showKeltner ? `· <span class="keltner-key"></span> Keltner ${KELTNER.emaLength}, ${KELTNER.multiplier}×ATR ${KELTNER.atrLength}${kNow
+        ? ` now <span class="keltner-now">${kNow.upper.toFixed(2)} / ${kNow.mid.toFixed(2)} / ${kNow.lower.toFixed(2)}</span> (upper / mid / lower)` : ''}` : ''}
       · <span class="band-key"></span> ${extendedCount} extended-hours
       (${bars.length - extendedCount} regular session)</figcaption>
   </figure>`;

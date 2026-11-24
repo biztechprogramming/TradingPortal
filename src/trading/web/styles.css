@@ -424,6 +424,10 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 /* Keltner channel: amber, so it never reads as an up/down candle colour. */
 .keltner { fill: none; stroke: var(--amber); stroke-width: 1.2; }
 .keltner-mid { stroke-dasharray: 4 3; opacity: .75; }
+.keltner-tag rect { fill: var(--amber); }
+.keltner-tag-mid rect { opacity: .7; }
+.keltner-tag text { fill: #1a1000; font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.keltner-now { color: var(--amber); font-variant-numeric: tabular-nums; }
 .keltner-key {
   display: inline-block; width: 14px; height: 0; vertical-align: 3px;
   border-top: 2px solid var(--amber);

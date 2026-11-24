@@ -55,7 +55,7 @@ def _place(client, symbol, price, **extra):
 # --- auth -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/api/ladder", "/api/candles?symbol=QQQ"])
+@pytest.mark.parametrize("path", ["/api/ladder", "/api/quotes", "/api/candles?symbol=QQQ"])
 def test_ladder_routes_require_a_token(client, path):
     assert client.get(path).status_code == 401
 
@@ -89,6 +89,25 @@ def test_ladder_exposes_per_account_orders_and_positions(client):
         assert name in body["accounts"]
         assert body["accounts"][name]["open_orders"] == []
         assert "QQQ" in body["accounts"][name]["positions"]
+
+
+def test_quotes_route_returns_just_the_quote_per_symbol(client):
+    body = client.get("/api/quotes", headers=AUTH).json()
+    assert body["symbols"]["QQQ"]["quote"]["bid"] == 500.00
+    assert body["symbols"]["PSQ"]["quote"]["ask"] == 32.12
+    assert "rungs" not in body["symbols"]["QQQ"]
+
+
+def test_quotes_route_follows_the_market_within_a_second(client):
+    client.get("/api/quotes", headers=AUTH)
+    for broker in client.service.brokers.values():
+        broker.set_quote("QQQ", 501.00, 501.04)
+    import time
+    time.sleep(client.service.PICKER_QUOTE_TTL_SECONDS + 0.1)
+    client.get("/api/quotes", headers=AUTH)   # stale: refreshes in background
+    time.sleep(0.2)
+    body = client.get("/api/quotes", headers=AUTH).json()
+    assert body["symbols"]["QQQ"]["quote"]["bid"] == 501.00
 
 
 # --- confirmation is unconditional -----------------------------------------

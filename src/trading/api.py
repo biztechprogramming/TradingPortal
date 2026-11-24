@@ -388,6 +388,10 @@ def create_app(
     def get_ladder() -> dict[str, Any]:
         return service.ladder()
 
+    @app.get("/api/quotes", dependencies=[Auth])
+    def get_quotes() -> dict[str, Any]:
+        return service.quotes()
+
     @app.post("/api/ladder/order", dependencies=[Auth])
     def post_ladder_order(payload: LadderOrderRequest) -> JSONResponse:
         try:

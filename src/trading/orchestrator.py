@@ -171,7 +171,9 @@ class TradingService:
             self.health.check_all()
             return errors
 
-    def display_quote(self, broker: Broker, symbol: str) -> tuple[Any, str | None]:
+    def display_quote(
+        self, broker: Broker, symbol: str, ttl: float | None = None,
+    ) -> tuple[Any, str | None]:
         """A quote for the dashboard, memoised for a few seconds.
 
         NEVER use this to price an order. Execution calls the broker directly
@@ -185,7 +187,8 @@ class TradingService:
         Returns ``(quote, error)``; exactly one is set.
         """
         key = f"{broker.name}:{symbol.upper()}"
-        ttl = self.settings.quote_display_ttl_seconds
+        if ttl is None:
+            ttl = self.settings.quote_display_ttl_seconds
         now = time.time()
         with self._quote_memo_lock:
             cached = self._quote_memo.get(key)
@@ -643,6 +646,33 @@ class TradingService:
         return out
 
     # --- ladder -----------------------------------------------------------
+
+    #: Memo for the price picker's one-second poll: short, so the box looks
+    #: live, but still shared by every open tab.
+    PICKER_QUOTE_TTL_SECONDS = 0.8
+
+    def quotes(self) -> dict[str, Any]:
+        """Just the display quote per traded symbol, for the price picker.
+
+        The full ladder takes seconds (session bars, open orders per
+        account); this is only the quote, so it can be polled every second.
+        Display only, like ``display_quote``: never used to price an order.
+        """
+        out: dict[str, Any] = {"generated_at": time.time(), "symbols": {}}
+        for symbol in self.settings.symbols:
+            entry: dict[str, Any] = {"quote": None, "error": None}
+            for broker in self.brokers.values():
+                if not broker.connected:
+                    continue
+                quote, error = self.display_quote(
+                    broker, symbol, ttl=self.PICKER_QUOTE_TTL_SECONDS)
+                if quote is None:
+                    entry["error"] = error
+                    continue
+                entry = {"quote": quote.to_dict(), "error": None}
+                break
+            out["symbols"][symbol] = entry
+        return out
 
     def ladder(self) -> dict[str, Any]:
         """Session high/low and the rung list for each traded symbol.

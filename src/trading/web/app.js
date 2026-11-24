@@ -2053,29 +2053,60 @@ function pickPrices(title, intro, legs) {
           if (allSelected) el.select();   // typing still replaces the price
         }
       }
-      const at = window.__lastLadder?.generated_at;
+      const at = quotesAt || window.__lastLadder?.generated_at;
       $('pick-age').textContent = at
-        ? `Quotes as of ${new Date(at * 1000).toLocaleTimeString()} · updating every 2s` : '';
+        ? `Quotes as of ${new Date(at * 1000).toLocaleTimeString()} · updating every second` : '';
       update();
     };
+    // Quotes come from the light /api/quotes every second; the full ladder
+    // takes seconds to build, so it only refreshes the levels, every 10s.
     let live = true;
-    let polling = false;
-    const poll = async () => {
-      if (!live || polling) return;
-      polling = true;
+    let quotesAt = 0;
+    let pollingQuotes = false;
+    let pollingLadder = false;
+    const pollQuotes = async () => {
+      if (!live || pollingQuotes) return;
+      pollingQuotes = true;
       try {
-        const res = await api('/api/ladder');
+        const res = await api('/api/quotes');
         if (live && res.status === 200 && res.body) {
-          window.__lastLadder = res.body;
+          const ladder = window.__lastLadder || (window.__lastLadder = { symbols: {} });
+          ladder.symbols = ladder.symbols || {};
+          for (const [sym, e] of Object.entries(res.body.symbols || {})) {
+            if (!e.quote) continue;
+            ladder.symbols[sym] = { ...(ladder.symbols[sym] || {}), quote: e.quote };
+          }
+          quotesAt = res.body.generated_at;
           redraw();
         }
       } catch { /* keep the last prices; the next tick retries */ }
-      polling = false;
+      pollingQuotes = false;
     };
-    const timer = setInterval(poll, 2000);
+    const pollLadder = async () => {
+      if (!live || pollingLadder) return;
+      pollingLadder = true;
+      try {
+        const res = await api('/api/ladder');
+        if (live && res.status === 200 && res.body) {
+          // Keep the newer per-second quotes over the ladder's slower ones.
+          const prev = window.__lastLadder?.symbols || {};
+          for (const [sym, e] of Object.entries(res.body.symbols || {})) {
+            const q = prev[sym]?.quote;
+            if (q && (!e.quote || (q.timestamp || 0) > (e.quote.timestamp || 0))) e.quote = q;
+          }
+          window.__lastLadder = res.body;
+          redraw();
+        }
+      } catch { /* keep the last levels */ }
+      pollingLadder = false;
+    };
+    const timer = setInterval(pollQuotes, 1000);
+    const ladderTimer = setInterval(pollLadder, 10000);
+    pollQuotes();
     const close = (value) => {
       live = false;
       clearInterval(timer);
+      clearInterval(ladderTimer);
       $('modal').classList.add('hidden');
       box?.classList.remove('modal-wide');
       $('modal-confirm').textContent = confirmText;

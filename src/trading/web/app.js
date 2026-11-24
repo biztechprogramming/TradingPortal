@@ -894,7 +894,10 @@ async function refreshCandles(refresh = true) {
     );
     // A reply for an interval or range the user has since left is dropped.
     for (const [sym, body] of results) {
-      if (body && body.bar_size === barSize) candleData[sym] = body;
+      if (body && body.bar_size === barSize) {
+        candleData[sym] = body;
+        applyLiveQuote(sym);   // the cached bars can trail the live quote
+      }
     }
     const first = Object.values(candleData)[0];
     if (first) {
@@ -906,6 +909,64 @@ async function refreshCandles(refresh = true) {
     renderCandles();
   } catch (err) {
     console.error(err);
+  }
+}
+
+// --- live last candle ---------------------------------------------------------
+// Between the minute-by-minute bar downloads, the newest candle follows the
+// live quote: its close moves, its high and low stretch. The next download
+// replaces it with the broker's own bar. Only the traded symbols have a quote.
+
+const BAR_SECONDS = { '1h': 3600, '4h': 14400 };
+const liveQuotes = {};
+
+function applyLiveQuote(sym) {
+  const q = liveQuotes[sym];
+  const data = candleData[sym];
+  const bars = data?.bars;
+  if (!q || !bars?.length || data.bar_size !== barSize) return false;
+  const price = q.last > 0 ? q.last : (q.bid > 0 && q.ask > 0 ? (q.bid + q.ask) / 2 : 0);
+  if (!(price > 0)) return false;
+  const period = BAR_SECONDS[barSize];
+  const lastBar = bars[bars.length - 1];
+  const at = q.timestamp || Date.now() / 1000;
+  if (at < lastBar[0]) return false;
+  if (at < lastBar[0] + period) {
+    const [, , h, l, c] = lastBar;
+    if (c === price && h >= price && l <= price) return false;
+    lastBar[2] = Math.max(h, price);
+    lastBar[3] = Math.min(l, price);
+    lastBar[4] = price;
+    return true;
+  }
+  // The quote is past the newest bar: open the next one, aligned to the
+  // series' own boundaries. Only on a real trade, so a quiet overnight feed
+  // does not draw flat bars the broker will never have.
+  if (price === lastBar[4]) return false;
+  const start = lastBar[0] + Math.floor((at - lastBar[0]) / period) * period;
+  bars.push([start, lastBar[4], Math.max(lastBar[4], price),
+    Math.min(lastBar[4], price), price, 0]);
+  return true;
+}
+
+let pollingLiveQuotes = false;
+async function refreshLiveCandles() {
+  if (!TOKEN || document.hidden || pollingLiveQuotes) return;
+  pollingLiveQuotes = true;
+  try {
+    const res = await api('/api/quotes');
+    if (res.status !== 200 || !res.body) return;
+    let changed = false;
+    for (const [sym, e] of Object.entries(res.body.symbols || {})) {
+      if (!e.quote) continue;
+      liveQuotes[sym] = e.quote;
+      if (applyLiveQuote(sym)) changed = true;
+    }
+    // Re-drawing under the pointer would blank the crosshair tooltip; the
+    // data is already updated, so the next tick off the chart shows it.
+    if (changed && !document.querySelector('.candle-hit:hover')) renderCandles();
+  } catch { /* the next tick retries */ } finally {
+    pollingLiveQuotes = false;
   }
 }
 
@@ -2255,6 +2316,7 @@ setInterval(() => {
 setInterval(() => { if (!busy) refresh(); }, 10000);
 refreshCandles();
 setInterval(() => { if (!busy) refreshCandles(); }, 60000);
+setInterval(refreshLiveCandles, 1000);
 
 // Poll for code changes more often than data: an edit should show up quickly.
 checkVersion();

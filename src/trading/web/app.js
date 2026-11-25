@@ -2018,7 +2018,7 @@ function channelPrices(sym, side) {
 /** Cents past the ask (buy) or under the bid (sell) offered as fill-now picks. */
 const CHASE_CENTS = [1, 2, 3, 5, 10, 15, 20, 30, 50];
 
-function pickPrices(title, intro, legs) {
+function pickPrices(title, intro, legs, { allowAuto = false } = {}) {
   const tick = orderTick();
   // A leg follows the market (its price box tracks the bid) until you touch
   // it: type, step, or click a chip or rung.
@@ -2076,6 +2076,8 @@ function pickPrices(title, intro, legs) {
     box?.classList.add('modal-wide');
     $('modal-title').textContent = title;
     $('modal-body').innerHTML = `<p class="muted">${intro}</p>${legHtml}
+      ${allowAuto ? `<div class="pick-auto"><button class="small" id="pick-auto">Automatic price instead</button>
+        <span class="muted">the app prices it off the live quote and reprices until it fills</span></div>` : ''}
       <div class="muted pick-age" id="pick-age"></div>
       <div id="limit-error" class="trading-msg"></div>`;
     $('modal').classList.remove('hidden');
@@ -2202,6 +2204,7 @@ function pickPrices(title, intro, legs) {
 
     // Delegated, because the chips and rungs are re-drawn on every poll.
     $('modal-body').onclick = (e) => {
+      if (e.target.closest('#pick-auto')) { close({}); return; }
       const pick = e.target.closest('.pick-chip, .pick-rung');
       if (pick) { set(pick.dataset.sym, Number(pick.dataset.price)); return; }
       const stepBtn = e.target.closest('.pick-step');
@@ -2225,15 +2228,26 @@ function pickPrices(title, intro, legs) {
   });
 }
 
-/** Resolves {SYM: price} or null if cancelled. */
-function askLimits(command) {
+/**
+ * Resolves {SYM: price}, {} for automatic pricing, or null if cancelled.
+ * Every command goes through here, so each one is confirmed and can always
+ * take a limit you choose. Only extended hours insists on one.
+ */
+async function askLimits(command) {
+  const required = needsChosenLimit(command);
+  const opts = { allowAuto: !required };
+  const how = required ? 'Extended hours: ' : '';
   if (command === 'GO_FLAT') {
     const held = [longSymbol, shortSymbol].filter(heldAnywhere);
-    if (!held.length) return Promise.resolve({});   // nothing to sell
+    if (!held.length) {
+      return await askConfirm('Confirm GO FLAT',
+        '<p>Nothing is held, so nothing will be sold.</p>') ? {} : null;
+    }
     return pickPrices('GO FLAT: set your sell prices',
-      'Extended hours: each sell goes in at exactly this price and is not '
+      `${how}each sell goes in at exactly the price you choose and is not `
       + 'repriced. Unfilled after the fill timeout, it is cancelled.',
-      held.map((sym) => ({ sym, side: 'SELL', title: `Sell all ${sym} (${fmtNum(sharesHeld(sym))} shares)` })));
+      held.map((sym) => ({ sym, side: 'SELL', title: `Sell all ${sym} (${fmtNum(sharesHeld(sym))} shares)` })),
+      opts);
   }
   const target = command === 'GO_LONG' ? longSymbol : shortSymbol;
   const other = command === 'GO_LONG' ? shortSymbol : longSymbol;
@@ -2243,10 +2257,10 @@ function askLimits(command) {
   }
   legs.push({ sym: target, side: 'BUY', title: `${legs.length ? '2. ' : ''}Buy ${target} with the cash` });
   return pickPrices(`${command.replace('_', ' ')}: set your price${legs.length > 1 ? 's' : ''}`,
-    'Extended hours: orders go in at exactly these prices and are not repriced. '
+    `${how}orders go in at exactly the prices you choose and are not repriced. `
     + 'The buy stays working until it fills.'
     + (legs.length > 1 ? ' The sell must fill first; if it does not fill in time it is cancelled and nothing is bought.' : ''),
-    legs);
+    legs, opts);
 }
 
 async function sendCommand(command) {
@@ -2255,11 +2269,9 @@ async function sendCommand(command) {
   const body = { command, request_id: requestId };
   const spreads = spreadOverrides();
   if (spreads) body.max_spread_ticks = spreads;
-  if (needsChosenLimit(command)) {
-    const limits = await askLimits(command);
-    if (!limits) return;
-    if (Object.keys(limits).length) body.limit_prices = limits;
-  }
+  const limits = await askLimits(command);
+  if (!limits) return;
+  if (Object.keys(limits).length) body.limit_prices = limits;
   setBusy(true);
   try {
     let res = await api('/api/command', { method: 'POST', body: JSON.stringify(body) });

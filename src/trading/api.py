@@ -33,6 +33,7 @@ from .errors import (
 )
 from .logins import IbkrGatewayRestart, LoginError, SchwabLoginFlow, gateway_container, ibeam_running, schwab_token_status
 from .models import Command
+from .order_actions import cancel_one_order, change_order_price
 from .orchestrator import TradingService
 
 log = logging.getLogger("trading.api")
@@ -94,6 +95,13 @@ class SchwabLoginRequest(BaseModel):
 
 class SchwabPasteRequest(BaseModel):
     url: str = Field(..., description="The full URL Schwab redirected to")
+
+
+class OrderActionRequest(BaseModel):
+    broker: str = Field(..., description="Account name as the dashboard shows it")
+    order_id: str = Field(..., description="The working order to act on")
+    limit_price: float | None = Field(
+        None, gt=0, description="New limit (change price only)")
 
 
 class LadderOrderRequest(BaseModel):
@@ -462,6 +470,31 @@ def create_app(
             )
         code = {"OK": 200, "PARTIAL": 207}.get(body["status"], 502)
         return JSONResponse(status_code=code, content=body)
+
+    def _order_action(fn, *args) -> JSONResponse:
+        try:
+            return JSONResponse(status_code=200, content=fn(service, *args, source="dashboard"))
+        except TradingError as exc:
+            return JSONResponse(
+                status_code=400, content={"status": "ERROR", "detail": str(exc)})
+        except Exception as exc:  # a broker error must reach the screen
+            log.exception("order action failed")
+            return JSONResponse(
+                status_code=502, content={"status": "ERROR", "detail": str(exc)})
+
+    @app.post("/api/order/cancel", dependencies=[Auth])
+    def cancel_order(payload: OrderActionRequest) -> JSONResponse:
+        """Cancel one working order. Works while a command is running."""
+        return _order_action(cancel_one_order, payload.broker, payload.order_id)
+
+    @app.post("/api/order/price", dependencies=[Auth])
+    def change_price(payload: OrderActionRequest) -> JSONResponse:
+        """Change one working order's limit. Works while a command is running."""
+        if payload.limit_price is None:
+            return JSONResponse(
+                status_code=400, content={"status": "ERROR", "detail": "limit_price is required"})
+        return _order_action(change_order_price, payload.broker, payload.order_id,
+                             payload.limit_price)
 
     @app.post("/api/acknowledge", dependencies=[Auth])
     def acknowledge(payload: AcknowledgeRequest) -> dict[str, Any]:

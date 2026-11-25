@@ -15,7 +15,9 @@ from . import audit as A
 from .audit import AuditLog
 from .brokers.base import Broker
 from .config import Settings
-from .errors import OrderValidationError, TradingError
+from .errors import (
+    LegCancelledOutside, LegLeftWorking, OrderValidationError, TradingError,
+)
 from .execution import ExecutionEngine, LegRequest, QuoteFallback, leg_from_exception
 from .models import (
     Balances,
@@ -209,7 +211,8 @@ class Strategy:
                 )
         sold_any = False
         for symbol in (self.settings.long_symbol, self.settings.short_symbol):
-            fill = self._liquidate(broker, symbol, result)
+            # A sell at a price you chose stays working until it fills.
+            fill = self._liquidate(broker, symbol, result, rest=True)
             if fill is not None:
                 sold_any = True
         if not sold_any:
@@ -218,18 +221,33 @@ class Strategy:
     def _check_flat(self, final: BrokerSnapshot, result: BrokerResult) -> None:
         """GO FLAT succeeded only if nothing is left; say so when it is not."""
         symbols = {self.settings.long_symbol.upper(), self.settings.short_symbol.upper()}
-        left = [
-            f"{p.quantity:g} {p.symbol}"
-            for p in final.positions
-            if p.symbol.upper() in symbols and p.quantity > 0
-        ]
+        # Shares covered by a sell still working at a chosen price are not a
+        # failure: that order is live and shown on the dashboard.
+        selling: dict[str, float] = {}
+        for o in final.open_orders:
+            if o.side is Side.SELL and o.state.is_open:
+                sym = o.symbol.upper()
+                selling[sym] = selling.get(sym, 0.0) + (
+                    o.quantity - (o.filled_quantity or 0.0))
+        left = []
+        for p in final.positions:
+            sym = p.symbol.upper()
+            if sym not in symbols or p.quantity <= 0:
+                continue
+            if selling.get(sym, 0.0) >= p.quantity:
+                result.warnings.append(
+                    f"still holding {p.quantity:g} {p.symbol} until the "
+                    "working sell fills")
+            else:
+                left.append(f"{p.quantity:g} {p.symbol}")
         if left:
             result.errors.append(
                 "not flat after GO FLAT: still holding " + ", ".join(left)
             )
 
     def _liquidate(
-        self, broker: Broker, symbol: str, result: BrokerResult
+        self, broker: Broker, symbol: str, result: BrokerResult,
+        *, rest: bool = False, leave_working: bool = False,
     ) -> Fill | None:
         """Sell the entire holding of ``symbol``, confirming the fill."""
         position = broker.get_position(symbol)
@@ -269,7 +287,14 @@ class Strategy:
             position_quantity=position.quantity,
             fixed_limit=chosen,
         )
-        fill = self.engine.execute_leg(broker, req)
+        if chosen is not None and rest:
+            fill = self.engine.place_resting_leg(broker, req)
+            if not fill.complete:
+                result.warnings.append(
+                    f"SELL {fill.requested_quantity - int(fill.filled_quantity)} "
+                    f"{symbol} working at ${chosen:,.2f} until it fills")
+        else:
+            fill = self.engine.execute_leg(broker, req, leave_working=leave_working)
         result.fills.append(fill)
         return fill
 
@@ -283,8 +308,27 @@ class Strategy:
         else:
             target, opposite = self.settings.short_symbol, self.settings.long_symbol
 
-        # 1. Exit the opposite side first and confirm it is gone.
-        opposite_fill = self._liquidate(broker, opposite, result)
+        # 1. Exit the opposite side first and confirm it is gone. A sell at a
+        # price you chose that has not filled by the timeout stays working,
+        # and nothing is bought until it has.
+        verb = command.value.replace("_", " ")
+        try:
+            opposite_fill = self._liquidate(
+                broker, opposite, result, leave_working=True)
+        except LegLeftWorking as exc:
+            fill = leg_from_exception(exc)
+            if fill is not None:
+                result.fills.append(fill)
+            result.warnings.append(
+                f"{exc}; nothing bought yet. Once it fills, press {verb} "
+                f"again to buy {target}.")
+            return
+        except LegCancelledOutside as exc:
+            fill = leg_from_exception(exc)
+            if fill is not None and fill.filled_quantity > 0:
+                raise
+            result.warnings.append(f"{exc}; nothing bought.")
+            return
         if opposite_fill is not None:
             remaining = broker.get_position(opposite)
             if remaining is not None and remaining.quantity > 0:

@@ -54,13 +54,29 @@ def test_chosen_buy_limit_rests_until_it_fills(tmp_path, extended):
     assert orders[0].state.is_open             # still working, not cancelled
 
 
-def test_unfilled_chosen_sell_is_cancelled_and_nothing_bought(tmp_path, extended):
+def test_unfilled_chosen_sell_stays_working_and_nothing_bought(tmp_path, extended):
     svc, b = _svc(tmp_path, positions={"PSQ": 100}, order_fill_timeout_seconds=0.2)
     result = svc.execute(Command.GO_LONG,
                          limit_prices={"QQQ": 500.04, "PSQ": 32.50})  # above the bid
-    assert not result.results[0].ok
-    assert all(o.symbol == "PSQ" and not o.state.is_open for o in b._orders.values())
+    r = result.results[0]
+    assert r.ok, r.errors
+    assert "still working at $32.50" in " ".join(r.warnings)
+    assert "nothing bought" in " ".join(r.warnings)
+    orders = list(b._orders.values())
+    assert [(o.symbol, o.state.is_open) for o in orders] == [("PSQ", True)]
     assert b.get_position("PSQ").quantity == 100
+    assert not result.mismatch
+
+
+def test_go_flat_chosen_sell_stays_working(tmp_path, extended):
+    svc, b = _svc(tmp_path, positions={"QQQ": 10})
+    result = svc.execute(Command.GO_FLAT, limit_prices={"QQQ": 510.00})  # above the bid
+    r = result.results[0]
+    assert r.ok, r.errors
+    assert "working at $510.00" in " ".join(r.warnings)
+    (order,) = b._orders.values()
+    assert order.state.is_open and order.limit_price == 510.00
+    assert not result.mismatch
 
 
 def test_a_held_opposite_side_needs_a_sell_limit(tmp_path, extended):

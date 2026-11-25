@@ -9,6 +9,7 @@ them so a partially-filled-then-replaced order is accounted for exactly once.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -22,6 +23,8 @@ from .errors import (
     OrderValidationError,
     WideSpreadError,
     OrderRejected,
+    LegCancelledOutside,
+    LegLeftWorking,
     OrderTimeout,
     QuoteError,
     TradingError,
@@ -86,6 +89,68 @@ class _LegState:
     @property
     def remaining(self) -> int:
         return max(0, int(round(self.requested - self.filled)))
+
+
+# --- changes made from the dashboard while a leg is watching -------------
+# Changing a price from the dashboard is a cancel/replace, and Schwab gives
+# the replacement a new id. A leg watching the old id would see it end and
+# stop tracking a live order, so the change is noted here and the leg
+# follows the new order instead. A dashboard cancel is noted the same way so
+# the leg can say what happened rather than report a timeout.
+
+_outside_lock = threading.Lock()
+_replaced: dict[tuple[str, str], Order] = {}
+_cancelled: set[tuple[str, str]] = set()
+_replacing: set[tuple[str, str]] = set()
+
+#: How long a leg waits for a dashboard replace that is in flight.
+REPLACE_WAIT_SECONDS = 15.0
+
+
+def note_replace_started(broker_name: str, order_id: str) -> None:
+    with _outside_lock:
+        _replacing.add((broker_name, str(order_id)))
+
+
+def note_replace_failed(broker_name: str, order_id: str) -> None:
+    with _outside_lock:
+        _replacing.discard((broker_name, str(order_id)))
+
+
+def note_replacement(broker_name: str, old_id: str, new_order: Order) -> None:
+    with _outside_lock:
+        _replacing.discard((broker_name, str(old_id)))
+        _replaced[(broker_name, str(old_id))] = new_order
+
+
+def note_cancel(broker_name: str, order_id: str) -> None:
+    with _outside_lock:
+        _cancelled.add((broker_name, str(order_id)))
+
+
+def _take_replacement(
+    broker_name: str, order_id: str,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Order | None:
+    """The replacement for ``order_id``, waiting briefly if one is in flight."""
+    key = (broker_name, str(order_id))
+    waited = 0.0
+    while True:
+        with _outside_lock:
+            if key in _replaced:
+                return _replaced.pop(key)
+            if key not in _replacing or waited >= REPLACE_WAIT_SECONDS:
+                return None
+        sleep(0.25)
+        waited += 0.25
+
+
+def _was_cancelled_outside(broker_name: str, order_id: str) -> bool:
+    with _outside_lock:
+        key = (broker_name, str(order_id))
+        found = key in _cancelled
+        _cancelled.discard(key)
+        return found
 
 
 #: ``(broker_name, symbol) -> (source_broker_name, quote)`` or ``None``.
@@ -224,9 +289,19 @@ class ExecutionEngine:
 
     # --- the main loop ----------------------------------------------------
 
-    def execute_leg(self, broker: Broker, req: LegRequest) -> Fill:
-        """Submit and manage one buy or sell until it fills, times out, or aborts."""
+    def execute_leg(
+        self, broker: Broker, req: LegRequest, *, leave_working: bool = False,
+    ) -> Fill:
+        """Submit and manage one buy or sell until it fills, times out, or aborts.
+
+        ``leave_working`` (chosen limits only): at the fill timeout the order
+        is left working at the broker instead of cancelled, and
+        :class:`LegLeftWorking` is raised carrying what has filled so far.
+        """
         fixed = req.fixed_limit
+        leave_working = leave_working and fixed is not None
+        timed_out = False
+        cancelled_outside = False
         quote = self.fresh_quote(broker, req.symbol, allow_wide=fixed is not None)
         anchor = quote.ask if req.side is Side.BUY else quote.bid
 
@@ -309,6 +384,24 @@ class ExecutionEngine:
                 break
 
             if order.state in (OrderState.CANCELLED, OrderState.EXPIRED):
+                replacement = _take_replacement(broker.name, order.order_id, self._sleep)
+                if replacement is not None:
+                    # The price was changed from the dashboard; follow the
+                    # replacement rather than lose track of a live order.
+                    state.notes.append(
+                        f"price changed to ${replacement.limit_price:,.2f} "
+                        f"from the dashboard (order {replacement.order_id})")
+                    order = replacement
+                    current_limit = replacement.limit_price
+                    if fixed is not None:
+                        fixed = replacement.limit_price
+                    state.record(order)
+                    continue
+                if _was_cancelled_outside(broker.name, order.order_id) or fixed:
+                    # Pulled from the dashboard or at the broker: never
+                    # resubmit what the user just cancelled.
+                    cancelled_outside = state.remaining > 0
+                    break
                 # Someone or something ended our order. If there is still
                 # work to do and time on the clock, resubmit the remainder;
                 # otherwise stop and report what we got.
@@ -342,6 +435,7 @@ class ExecutionEngine:
                     f"complete within {self.settings.order_fill_timeout_seconds}s "
                     f"({state.filled:g}/{state.requested} filled)"
                 )
+                timed_out = True
                 break
 
             if (fixed is None and now >= next_reprice
@@ -365,22 +459,29 @@ class ExecutionEngine:
 
             self._sleep(self.settings.order_poll_interval_seconds)
 
+        if leave_working and timed_out:
+            # The user chose this price: keep it working rather than pull it.
+            # It shows on the dashboard, where it can be changed or cancelled.
+            state.record(order)
+            fill = self._fill_from(req, state)
+            fill.notes.append(
+                f"left working at ${current_limit:,.2f} (order {order.order_id})")
+            self._log(A.ORDER_PARTIAL, broker.name, fill=fill.to_dict(),
+                      left_working=True, order=order.to_dict())
+            err = LegLeftWorking(
+                f"{broker.name}: {req.side.value} "
+                f"{state.remaining} {req.symbol} still working at "
+                f"${current_limit:,.2f}")
+            err.fill = fill  # type: ignore[attr-defined]
+            err.order = order  # type: ignore[attr-defined]
+            raise err
+
         # Anything still working must be cancelled before we return, or we
         # would leave an order live that the next command knows nothing about.
         final_order = self._ensure_closed(broker, order, state)
         state.record(final_order)
 
-        fill = Fill(
-            symbol=req.symbol,
-            side=req.side,
-            requested_quantity=state.requested,
-            filled_quantity=state.filled,
-            average_price=round(state.average_price, 6),
-            order_ids=list(state.order_ids),
-            complete=state.remaining == 0 and state.filled > 0,
-            reprice_count=state.reprices,
-            notes=state.notes,
-        )
+        fill = self._fill_from(req, state)
         self._log(
             A.LEG_COMPLETE if fill.complete else A.ORDER_PARTIAL,
             broker.name,
@@ -392,6 +493,14 @@ class ExecutionEngine:
             abort_error.fill = fill  # type: ignore[attr-defined]
             raise abort_error
 
+        if cancelled_outside and not fill.complete:
+            err = LegCancelledOutside(
+                f"{broker.name}: {req.side.value} {req.symbol} order was "
+                "cancelled from the dashboard or at the broker "
+                f"({state.filled:g} of {state.requested} filled)")
+            err.fill = fill  # type: ignore[attr-defined]
+            raise err
+
         if not fill.complete:
             err = OrderTimeout(
                 f"{broker.name}: {req.side.value} {req.symbol} filled "
@@ -402,6 +511,20 @@ class ExecutionEngine:
 
         self._log(A.ORDER_FILLED, broker.name, fill=fill.to_dict())
         return fill
+
+    @staticmethod
+    def _fill_from(req: LegRequest, state: _LegState) -> Fill:
+        return Fill(
+            symbol=req.symbol,
+            side=req.side,
+            requested_quantity=state.requested,
+            filled_quantity=state.filled,
+            average_price=round(state.average_price, 6),
+            order_ids=list(state.order_ids),
+            complete=state.remaining == 0 and state.filled > 0,
+            reprice_count=state.reprices,
+            notes=state.notes,
+        )
 
     # --- resting orders ---------------------------------------------------
 

@@ -231,9 +231,16 @@ function renderBrokers(status) {
               <td class="num">${q}</td>
               <td class="num">${fmtPrice(o.limit_price, tick)}</td>
               <td>${esc(o.state)}</td>
+              <td class="order-actions">${b.read_only ? '' : `
+                <button class="small order-act" data-act="price" data-broker="${esc(name)}"
+                  data-id="${esc(o.order_id)}" data-sym="${esc(o.symbol)}" data-side="${esc(o.side)}"
+                  data-qty="${o.quantity - filled}" data-limit="${o.limit_price}">Change</button>
+                <button class="small danger order-act" data-act="cancel" data-broker="${esc(name)}"
+                  data-id="${esc(o.order_id)}" data-sym="${esc(o.symbol)}" data-side="${esc(o.side)}"
+                  data-qty="${o.quantity - filled}" data-limit="${o.limit_price}">Cancel</button>`}</td>
             </tr>`;
           }).join('')
-        : `<tr><td colspan="5" class="muted">no working orders</td></tr>`;
+        : `<tr><td colspan="6" class="muted">no working orders</td></tr>`;
 
       return `<div class="panel">
         <div class="broker-head">
@@ -260,7 +267,7 @@ function renderBrokers(status) {
         </h3>
         <table class="sub-table">
           <thead><tr><th>Side</th><th>Symbol</th><th class="num">Qty</th>
-            <th class="num">Limit</th><th>State</th></tr></thead>
+            <th class="num">Limit</th><th>State</th><th></th></tr></thead>
           <tbody>${orderRows}</tbody>
         </table>
         <p class="sub-note">
@@ -2026,12 +2033,13 @@ function channelPrices(sym, side) {
 /** Cents past the ask (buy) or under the bid (sell) offered as fill-now picks. */
 const CHASE_CENTS = [1, 2, 3, 5, 10, 15, 20, 30, 50];
 
-function pickPrices(title, intro, legs, { allowAuto = false } = {}) {
+function pickPrices(title, intro, legs, { allowAuto = false, start = {} } = {}) {
   const tick = orderTick();
   // A leg follows the market (its price box tracks the bid) until you touch
   // it: type, step, or click a chip or rung.
-  const touched = new Set();
+  const touched = new Set(Object.keys(start));
   const marketDefault = (sym) => {
+    if (start[sym]) return snapToTick(start[sym], tick);
     const q = pickQuote(sym);
     const start = q.bid || q.last;
     return start ? snapToTick(start, tick) : 0;
@@ -2252,8 +2260,8 @@ async function askLimits(command) {
         '<p>Nothing is held, so nothing will be sold.</p>') ? {} : null;
     }
     return pickPrices('GO FLAT: set your sell prices',
-      `${how}each sell goes in at exactly the price you choose and is not `
-      + 'repriced. Unfilled after the fill timeout, it is cancelled.',
+      `${how}each sell goes in at exactly the price you choose and stays working `
+      + 'until it fills. Change or cancel it any time from its account card.',
       held.map((sym) => ({ sym, side: 'SELL', title: `Sell all ${sym} (${fmtNum(sharesHeld(sym))} shares)` })),
       opts);
   }
@@ -2265,9 +2273,10 @@ async function askLimits(command) {
   }
   legs.push({ sym: target, side: 'BUY', title: `${legs.length ? '2. ' : ''}Buy ${target} with the cash` });
   return pickPrices(`${command.replace('_', ' ')}: set your price${legs.length > 1 ? 's' : ''}`,
-    `${how}orders go in at exactly the prices you choose and are not repriced. `
-    + 'The buy stays working until it fills.'
-    + (legs.length > 1 ? ' The sell must fill first; if it does not fill in time it is cancelled and nothing is bought.' : ''),
+    `${how}orders go in at exactly the prices you choose and stay working until they fill. `
+    + 'Change or cancel any of them from its account card.'
+    + (legs.length > 1 ? ' The sell must fill first: if it has not filled in 90s it keeps working, '
+      + 'nothing is bought, and you press this button again once it has.' : ''),
     legs, opts);
 }
 
@@ -2275,7 +2284,7 @@ let runningCommand = null;   // { command, limits, startedAt } while one is in f
 
 /** What the running command has working right now, from the account cards' data. */
 function runningAlert(status) {
-  const { command, limits, startedAt } = runningCommand;
+  const { command, startedAt } = runningCommand;
   const secs = Math.round((Date.now() - startedAt) / 1000);
   const orders = Object.entries(status.brokers || {}).flatMap(([name, b]) =>
     (b.open_orders || [])
@@ -2283,19 +2292,54 @@ function runningAlert(status) {
       .map((o) => `${esc(name)}: ${esc(o.side)} ${fmtNum(o.quantity - (o.filled_quantity || 0))} `
         + `${esc(o.symbol)} @ ${fmtTick(o.limit_price)} ${esc(o.state)}`));
   const timeout = status.config?.order_fill_timeout_seconds || 90;
-  const chosen = Object.keys(limits || {}).length;
   return {
     level: 'warn',
     html: `<strong>${esc(command.replace('_', ' '))} running — ${secs}s of ${timeout}s.</strong> `
       + (orders.length
         ? `Live at the broker now:<br>${orders.join('<br>')}`
         : 'No order showing at the broker yet (the accounts refresh every 10s).')
-      + (chosen
-        ? `<br>Unfilled at ${timeout}s, ${orders.length > 1 ? 'these are' : 'it is'} cancelled. `
-          + 'To change a price before then, change it at the broker.'
-        : ''),
+      + (orders.length ? '<br>Change or cancel any of them from its account card below.' : ''),
   };
 }
+
+// --- one working order: change its price or cancel it ----------------------
+// Always available, even while a command runs: the command follows a price
+// change to the new order instead of losing track of it.
+
+async function orderAction(btn) {
+  const { act, broker, id, sym, side } = btn.dataset;
+  const qty = Number(btn.dataset.qty);
+  const limit = Number(btn.dataset.limit);
+  const what = `${side} ${fmtNum(qty)} ${sym} @ ${fmtTick(limit)} in ${broker}`;
+  let res;
+  if (act === 'cancel') {
+    if (!await askConfirm('Cancel this order?', `<p>${esc(what)}</p>
+        <p>Cancels this one order. Nothing else is touched.</p>`)) return;
+    res = await api('/api/order/cancel', {
+      method: 'POST', body: JSON.stringify({ broker, order_id: id }) });
+  } else {
+    const prices = await pickPrices(`Change price: ${side} ${sym}`,
+      `${esc(what)}. The order is replaced at the new price for the shares still unfilled.`,
+      [{ sym, side, title: `${side === 'BUY' ? 'Buy' : 'Sell'} ${fmtNum(qty)} ${sym}` }],
+      { start: { [sym]: limit } });
+    if (!prices) return;
+    res = await api('/api/order/price', {
+      method: 'POST',
+      body: JSON.stringify({ broker, order_id: id, limit_price: prices[sym] }) });
+  }
+  if (res.status === 200) {
+    toast(act === 'cancel' ? `Cancelled: ${what}`
+      : `${broker}: ${side} ${sym} now @ ${fmtTick(res.body.order?.limit_price)}`);
+  } else {
+    toast(`${act === 'cancel' ? 'Cancel' : 'Change'} failed: ${res.body?.detail || res.status}`,
+      { error: true, ms: 10000 });
+  }
+  refresh();
+}
+$('brokers').addEventListener('click', (e) => {
+  const btn = e.target.closest('.order-act');
+  if (btn) orderAction(btn);
+});
 
 async function sendCommand(command) {
   if (busy) return;

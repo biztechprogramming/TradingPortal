@@ -529,3 +529,6 @@ button.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .pick-sub { margin-top: 10px; font-size: 12px; }
 .pick-chase { border-color: #5a4a2a; }
 .pick-on, .pick-chip.pick-on { border-color: var(--blue); background: #1b2a3b; }
+
+.order-actions { white-space: nowrap; text-align: right; }
+.order-actions .small { padding: 2px 8px; }

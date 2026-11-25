@@ -105,6 +105,18 @@ class InsufficientFunds(OrderError):
     pass
 
 
+class LegLeftWorking(OrderError):
+    """A chosen-limit order did not fill in time and was left working.
+
+    Deliberate, not a failure: the order is live at the broker at the price
+    the user chose and can be changed or cancelled from the dashboard.
+    """
+
+
+class LegCancelledOutside(OrderError):
+    """The order was cancelled from the dashboard or at the broker mid-leg."""
+
+
 # --- safety / concurrency ----------------------------------------------------
 
 

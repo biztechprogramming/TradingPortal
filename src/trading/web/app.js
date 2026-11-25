@@ -2041,8 +2041,8 @@ function pickPrices(title, intro, legs, { allowAuto = false, start = {} } = {}) 
   const marketDefault = (sym) => {
     if (start[sym]) return snapToTick(start[sym], tick);
     const q = pickQuote(sym);
-    const start = q.bid || q.last;
-    return start ? snapToTick(start, tick) : 0;
+    const fromMarket = q.bid || q.last;
+    return fromMarket ? snapToTick(fromMarket, tick) : 0;
   };
   const marketHtml = (leg) => {
     const q = pickQuote(leg.sym);

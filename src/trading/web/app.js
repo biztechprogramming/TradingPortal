@@ -1729,15 +1729,20 @@ async function refreshOnce() {
     // to quote must never hold the account cards back.
     // Kept for the confirmation dialog, which needs to state whether a
     // click will place a new order or re-price a working one.
-    sidePanel('ladder', '/api/ladder', (body) => {
-      window.__lastLadder = body;
-      renderLadder(body);
-    });
-    sidePanel('holdings', '/api/holdings', renderHoldings);
+    // While a command runs only the accounts and events refresh, so the
+    // broker's request budget goes to watching the orders.
+    const light = busy;
+    if (!light) {
+      sidePanel('ladder', '/api/ladder', (body) => {
+        window.__lastLadder = body;
+        renderLadder(body);
+      });
+      sidePanel('holdings', '/api/holdings', renderHoldings);
+    }
     const [status, audit, perf] = await Promise.all([
       api('/api/status'),
       api('/api/audit?limit=80'),
-      api('/api/performance'),
+      light ? Promise.resolve(null) : api('/api/performance'),
     ]);
     const s = status.body;
     window.__lastStatus = s;
@@ -1750,12 +1755,15 @@ async function refreshOnce() {
     renderBrokers(s);
     toastCommandErrors(s);
     renderEvents(audit.body.events || []);
-    renderChart(perf.body);
-    renderReturns(perf.body);
+    if (perf) {
+      renderChart(perf.body);
+      renderReturns(perf.body);
+    }
     const red = redAccounts(s);
     applyTradingBlock();
 
     const alerts = [];
+    if (runningCommand) alerts.push(runningAlert(s));
     if (s.state?.mismatch) {
       alerts.push({
         level: 'error',
@@ -2263,6 +2271,32 @@ async function askLimits(command) {
     legs, opts);
 }
 
+let runningCommand = null;   // { command, limits, startedAt } while one is in flight
+
+/** What the running command has working right now, from the account cards' data. */
+function runningAlert(status) {
+  const { command, limits, startedAt } = runningCommand;
+  const secs = Math.round((Date.now() - startedAt) / 1000);
+  const orders = Object.entries(status.brokers || {}).flatMap(([name, b]) =>
+    (b.open_orders || [])
+      .filter((o) => ['PENDING', 'WORKING', 'PARTIALLY_FILLED'].includes(o.state))
+      .map((o) => `${esc(name)}: ${esc(o.side)} ${fmtNum(o.quantity - (o.filled_quantity || 0))} `
+        + `${esc(o.symbol)} @ ${fmtTick(o.limit_price)} ${esc(o.state)}`));
+  const timeout = status.config?.order_fill_timeout_seconds || 90;
+  const chosen = Object.keys(limits || {}).length;
+  return {
+    level: 'warn',
+    html: `<strong>${esc(command.replace('_', ' '))} running — ${secs}s of ${timeout}s.</strong> `
+      + (orders.length
+        ? `Live at the broker now:<br>${orders.join('<br>')}`
+        : 'No order showing at the broker yet (the accounts refresh every 10s).')
+      + (chosen
+        ? `<br>Unfilled at ${timeout}s, ${orders.length > 1 ? 'these are' : 'it is'} cancelled. `
+          + 'To change a price before then, change it at the broker.'
+        : ''),
+  };
+}
+
 async function sendCommand(command) {
   if (busy) return;
   const requestId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2273,6 +2307,9 @@ async function sendCommand(command) {
   if (!limits) return;
   if (Object.keys(limits).length) body.limit_prices = limits;
   setBusy(true);
+  runningCommand = { command, limits, startedAt: Date.now() };
+  // Show the orders as soon as they are in, not on the next 10s tick.
+  const early = [setTimeout(refresh, 3000), setTimeout(refresh, 6000)];
   try {
     let res = await api('/api/command', { method: 'POST', body: JSON.stringify(body) });
 
@@ -2293,6 +2330,8 @@ async function sendCommand(command) {
   } catch (err) {
     setAlerts([{ level: 'error', html: esc(String(err)) }]);
   } finally {
+    early.forEach(clearTimeout);
+    runningCommand = null;
     setBusy(false);
     refresh();
   }
@@ -2342,7 +2381,9 @@ setInterval(() => {
   loginTicks += 1;
   if (loginsBusy || loginTicks % 5 === 0) refreshLogins();
 }, 2000);
-setInterval(() => { if (!busy) refresh(); }, 10000);
+// Keeps going while a command runs: its orders are live at the broker then,
+// and the account cards are the only place they show.
+setInterval(refresh, 10000);
 refreshCandles();
 setInterval(() => { if (!busy) refreshCandles(); }, 60000);
 setInterval(refreshLiveCandles, 1000);

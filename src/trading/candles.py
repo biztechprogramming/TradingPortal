@@ -35,6 +35,7 @@ from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from .models import FUTURES_ROOTS, Bar
+from .rolls import rebase, roll_adjustment
 
 log = logging.getLogger("trading.candles")
 
@@ -158,6 +159,11 @@ def day_start(ts: float) -> int:
     """
     local = datetime.fromtimestamp(ts + 12 * HOUR if _utc_midnight(ts) else ts, ET)
     return int(datetime(local.year, local.month, local.day, tzinfo=ET).timestamp())
+
+
+def _restamp_daily(bars: Sequence[Bar]) -> list[Bar]:
+    return [Bar(symbol=b.symbol, ts=day_start(b.ts), open=b.open, high=b.high,
+                low=b.low, close=b.close, volume=b.volume) for b in bars]
 
 
 def _utc_midnight(ts: float) -> bool:
@@ -366,6 +372,28 @@ class CandleStore:
                 (symbol.upper(),)).fetchone()
         return row["version"] if row else None
 
+    def set_version(self, symbol: str, version: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO series_version (symbol, version, seen_at)"
+                " VALUES (?, ?, ?)", (symbol.upper(), version, time.time()))
+            self._db.commit()
+
+    def bar_sizes(self, symbol: str) -> list[str]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT bar_size FROM bars WHERE symbol = ?",
+                (symbol.upper(),)).fetchall()
+        return [r["bar_size"] for r in rows]
+
+    def drop_series(self, symbol: str, bar_size: str) -> None:
+        """Forget one bar size of ``symbol``: its bars and fetch records."""
+        with self._lock:
+            for table in ("bars", "fetched_ranges", "history_done"):
+                self._db.execute(f"DELETE FROM {table} WHERE symbol = ?"
+                                 " AND bar_size = ?", (symbol.upper(), bar_size))
+            self._db.commit()
+
     def reset_series(self, symbol: str, version: str) -> None:
         """Forget every bar and fetch record for ``symbol``; record ``version``."""
         sym = symbol.upper()
@@ -448,17 +476,20 @@ class CandleService:
             if bars is None:      # adapter cannot do bars at all
                 continue
             if bar_size == DAILY:
-                bars = [Bar(symbol=b.symbol, ts=day_start(b.ts), open=b.open,
-                            high=b.high, low=b.low, close=b.close,
-                            volume=b.volume) for b in bars]
+                bars = _restamp_daily(bars)
             return bars, broker.name, errors
         return [], "", errors
 
-    def check_roll(self, brokers: Sequence[Any], symbol: str) -> str | None:
-        """Start a continuous future over when its front month has rolled.
+    def check_roll(self, brokers: Sequence[Any], symbol: str,
+                   realign: bool = False) -> str | None:
+        """Notice when a continuous future's front month has rolled.
 
         Returns the current contract (e.g. ``NQZ6``), or None for a series
-        that is not a continuous future or when no source can say.
+        that is not a continuous future or when no source can say. History
+        is never thrown away at a roll: with ``realign`` the cached bars are
+        moved onto the new contract's scale (see :meth:`_roll_over`), which
+        takes a multi-year download, so only the background backfill asks
+        for it. Until then the stored version stays the old contract.
         """
         for broker in brokers:
             ask = getattr(broker, "series_version", None)
@@ -473,14 +504,50 @@ class CandleService:
             if current is None:
                 return None
             previous = self.store.version(symbol)
-            if previous != current:
-                if previous is not None:
-                    log.warning("%s rolled %s -> %s: re-downloading history "
-                                "back-adjusted to the new contract",
-                                symbol, previous, current)
-                self.store.reset_series(symbol, current)
+            if previous is None:
+                self.store.reset_series(symbol, current)   # first sight
+            elif previous != current and realign:
+                log.warning("%s rolled %s -> %s: moving cached history onto "
+                            "the new contract", symbol, previous, current)
+                self._roll_over(broker, symbol, current)
             return current
         return self.store.version(symbol)
+
+    def _roll_over(self, broker: Any, symbol: str, contract: str) -> None:
+        """Move every cached bar of ``symbol`` onto ``contract``'s scale.
+
+        The broker's fresh series replaces what it covers; everything older
+        is shifted by the roll gap measured where the two overlap. All bar
+        sizes are worked out before anything is written, so a failure
+        leaves the cache exactly as it was, still on the old contract.
+        """
+        now = time.time()
+        writes: list[tuple[str, list[Bar], list[Bar]]] = []
+        for size in self.store.bar_sizes(symbol):
+            if size not in (DAILY, self.settings.candle_bar_size):
+                writes.append((size, [], []))   # session-timing bars: refetched
+                continue
+            if size == DAILY:
+                fresh = _restamp_daily(broker.get_price_bars(
+                    symbol, now - 6 * 365 * 86400, now, bar_size=DAILY,
+                    outside_rth=False) or [])
+            else:
+                fresh = broker.history_chunk(
+                    symbol, now, bar_size=size,
+                    outside_rth=self.settings.candle_outside_rth)
+            old = self.store.bars(symbol, 0, now + 86400, size)
+            how = roll_adjustment(old, fresh)
+            log.info("%s %s roll adjustment: %s %.4f", symbol, size, *how)
+            covered = {b.ts for b in fresh}
+            writes.append((size, rebase([b for b in old if b.ts not in covered], how),
+                           fresh))
+        for size, shifted, fresh in writes:
+            if not shifted and not fresh:
+                self.store.drop_series(symbol, size)
+                continue
+            self.store.upsert(shifted, source="rolled", bar_size=size)
+            self.store.upsert(fresh, source=broker.name, bar_size=size)
+        self.store.set_version(symbol, contract)
 
     def refresh(
         self,
@@ -490,9 +557,21 @@ class CandleService:
         bar_size: str | None = None,
     ) -> dict[str, Any]:
         """Bring ``symbol`` up to date with the smallest correct fetch."""
-        if symbol.upper() in FUTURES_ROOTS:
-            self.check_roll(brokers, symbol)
         bar_size = bar_size or self.settings.candle_bar_size
+        if symbol.upper() in FUTURES_ROOTS:
+            current = self.check_roll(brokers, symbol)
+            if current and current != self.store.version(symbol):
+                # New-contract bars must not land among old-contract ones;
+                # the backfill thread realigns first, within ten minutes.
+                oldest, newest, count = self.store.coverage(symbol, bar_size)
+                return {
+                    "symbol": symbol.upper(), "bar_size": bar_size,
+                    "reason": "roll pending", "ranges_fetched": [],
+                    "bars_written": 0, "source": "", "cached_bars": count,
+                    "oldest": oldest, "newest": newest,
+                    "errors": [f"{symbol.upper()} rolled to {current}; older "
+                               "history is being moved onto the new contract"],
+                }
         days = days or self.settings.candle_days
         now = time.time()
         window_start = now - days * 86400
@@ -662,7 +741,7 @@ class CandleService:
         background thread, so a restart simply resumes from the oldest bar.
         """
         if symbol.upper() in FUTURES_ROOTS:
-            self.check_roll(brokers, symbol)
+            self.check_roll(brokers, symbol, realign=True)
         if self.store.history_complete(symbol, bar_size):
             return "done"
         sources = [b for b in brokers

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from trading.candles import CandleService, CandleStore, aggregate
+from trading.candles import CandleService, CandleStore, aggregate, day_start
 from trading.models import Bar
 from tests.conftest import make_settings
 
@@ -77,27 +77,113 @@ class _Future(_Ibkr):
                     close=b.close, volume=b.volume) for b in bars]
 
 
-def test_a_futures_roll_restarts_the_series(tmp_path):
-    settings = make_settings(tmp_path)
+def test_first_sight_of_a_future_starts_clean(tmp_path):
     store = CandleStore(tmp_path / "c.db")
-    svc = CandleService(settings, store)
-    now = _ts(2026, 11, 1, 10)
-    src = _Future(floor=now - 2 * 365 * 86400, contract="NQZ6")
-    store.upsert([Bar(symbol="NQ", ts=now, open=1, high=2, low=0.5, close=1.5)])
-    assert svc.check_roll([src], "NQ") == "NQZ6"
-    assert store.coverage("NQ")[2] == 0            # first sight: clean start
-    store.upsert([Bar(symbol="NQ", ts=now, open=1, high=2, low=0.5, close=1.5)])
-    while svc.backfill_history([src], "NQ") != "done":
-        pass
-    assert store.history_complete("NQ")
-    assert svc.check_roll([src], "NQ") == "NQZ6"   # same contract: kept
-    assert store.coverage("NQ")[2] > 1
-
-    src.contract = "NQH7"                          # the roll
-    assert svc.check_roll([src], "NQ") == "NQH7"
+    svc = CandleService(make_settings(tmp_path), store)
+    store.upsert([Bar(symbol="NQ", ts=_ts(2026, 11, 1, 10), open=1, high=2,
+                      low=0.5, close=1.5)])
+    assert svc.check_roll([_Future(0, "NQZ6")], "NQ") == "NQZ6"
     assert store.coverage("NQ")[2] == 0
-    assert not store.history_complete("NQ")
+    assert store.version("NQ") == "NQZ6"
+
+
+DAY = 86400
+
+
+def _nq(ts, close):
+    return Bar(symbol="NQ", ts=int(ts), open=close - 1, high=close + 2,
+               low=close - 2, close=close, volume=7)
+
+
+class _Rolled:
+    """IBKR after a roll: four years of bars, all `gap` higher than before."""
+
+    name = "ibkr:U1"
+    connected = True
+
+    def __init__(self, now, gap, contract="NQH7"):
+        self.now, self.gap, self.contract = now, gap, contract
+        self.calls = []
+
+    def series_version(self, symbol):
+        return self.contract
+
+    def _series(self, step):
+        start = self.now - 4 * 365 * DAY
+        return [_nq(t, 1000 + (t - start) / DAY + self.gap)
+                for t in range(int(start), int(self.now), step)]
+
+    def history_chunk(self, symbol, end, *, bar_size="1h", outside_rth=True):
+        self.calls.append("history_chunk")
+        return self._series(DAY)          # one "hourly" bar a day keeps it small
+
+    def get_price_bars(self, symbol, start, end, *, bar_size="1h", outside_rth=True):
+        self.calls.append(f"bars {bar_size}")
+        return self._series(DAY) if bar_size == "1d" else []
+
+
+def _old_nq(store, now):
+    """Six years of NQ on the old contract, hourly and daily."""
+    start = now - 4 * 365 * DAY
+    old = [_nq(t, 1000 + (t - start) / DAY)
+           for t in range(int(now - 6 * 365 * DAY), int(now), DAY)]
+    store.upsert(old, bar_size="1h")
+    store.upsert([Bar(**{**b.__dict__, "ts": day_start(b.ts)}) for b in old],
+                 bar_size="1d")
+    store.mark_history_complete("NQ", "1h")
+    store.set_version("NQ", "NQZ6")
+    return old
+
+
+def test_a_roll_keeps_all_history_on_the_new_contracts_scale(tmp_path):
+    import time
+    store = CandleStore(tmp_path / "c.db")
+    svc = CandleService(make_settings(tmp_path), store)
+    now = time.time()
+    old = _old_nq(store, now)
+    src = _Rolled(now, gap=50)
+
+    # The dashboard's refresh sees the roll but leaves the cache alone.
+    meta = svc.refresh([src], "NQ", bar_size="1h")
+    assert meta["reason"] == "roll pending" and "NQH7" in meta["errors"][0]
+    assert src.calls == [] and store.version("NQ") == "NQZ6"
+
+    # The backfill thread realigns: nothing is lost, everything moves +50.
+    svc.backfill_history([src], "NQ")
     assert store.version("NQ") == "NQH7"
+    for size in ("1h", "1d"):
+        bars = store.bars("NQ", 0, now + DAY, size)
+        assert len(bars) == len(old)
+        assert bars[0].close == old[0].close + 50
+        assert bars[-1].close == old[-1].close + 50
+
+    # Settled: later refreshes fetch normally again.
+    assert svc.refresh([src], "NQ", bar_size="1h")["reason"] != "roll pending"
+
+
+def test_a_roll_that_cannot_be_lined_up_changes_nothing(tmp_path):
+    import time
+    import pytest
+    from trading.rolls import RollMismatch
+    store = CandleStore(tmp_path / "c.db")
+    svc = CandleService(make_settings(tmp_path), store)
+    now = time.time()
+    old = _old_nq(store, now)
+    src = _Rolled(now + 10 * 365 * DAY, gap=50)   # no overlap at all
+    with pytest.raises(RollMismatch):
+        svc.backfill_history([src], "NQ")
+    assert store.version("NQ") == "NQZ6"
+    assert [b.close for b in store.bars("NQ", 0, now + DAY, "1h")] == [b.close for b in old]
+
+
+def test_roll_adjustment_tells_a_gap_from_a_ratio():
+    from trading.rolls import roll_adjustment
+    old = [_nq(i * DAY, 100 + 10 * i) for i in range(10)]
+    added = [_nq(b.ts, b.close + 25) for b in old]
+    scaled = [_nq(b.ts, b.close * 1.02) for b in old]
+    assert roll_adjustment(old, added) == ("add", 25)
+    kind, k = roll_adjustment(old, scaled)
+    assert kind == "mul" and abs(k - 1.02) < 1e-9
 
 
 def test_non_futures_have_no_version(tmp_path):

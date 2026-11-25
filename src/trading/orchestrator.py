@@ -540,10 +540,12 @@ class TradingService:
             failures: dict[str, int] = {}
             while True:
                 if not pending:
-                    # Idle, but a futures roll wipes that series' history, so
-                    # look again now and then.
+                    # Idle, but a futures roll has to be noticed and its
+                    # history realigned, so look again now and then. A roll
+                    # that failed to realign is retried here too.
                     time.sleep(600)
-                    pending = {s for s in symbols if failures.get(s, 0) < 5}
+                    failures.clear()
+                    pending = set(symbols)
                 progressed = False
                 for symbol in symbols:
                     if symbol not in pending:

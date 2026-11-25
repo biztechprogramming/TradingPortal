@@ -30,7 +30,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
@@ -137,24 +137,60 @@ MIGRATIONS: list[tuple[int, str]] = [
 HOUR = 3600
 ET = ZoneInfo("America/New_York")
 
-#: Bar sizes built from stored hourly bars rather than fetched.
-DERIVED = {"4h": ("1h", 4)}
+#: Bar sizes built from a stored series rather than fetched:
+#: ``{size: (stored size, bucket)}``. A bucket is hours (int), ``"week"``
+#: or ``"month"``.
+DERIVED: dict[str, tuple[str, int | str]] = {
+    "4h": ("1h", 4), "1w": ("1d", "week"), "1mo": ("1d", "month"),
+}
+
+#: The stored series of whole trading days: regular session only, kept
+#: forever, and fetched back as far as the broker goes.
+DAILY = "1d"
 
 
-def aggregate(bars: Sequence[Bar], hours: int) -> list[Bar]:
-    """Roll hourly bars up into ``hours``-hour bars.
+def day_start(ts: float) -> int:
+    """Midnight Eastern of the trading day ``ts`` falls on.
+
+    Brokers stamp daily bars differently (IBKR a bare date at UTC midnight,
+    Schwab midnight Central), so daily bars are re-stamped to this before
+    they are stored and both sources land on the same row.
+    """
+    local = datetime.fromtimestamp(ts + 12 * HOUR if _utc_midnight(ts) else ts, ET)
+    return int(datetime(local.year, local.month, local.day, tzinfo=ET).timestamp())
+
+
+def _utc_midnight(ts: float) -> bool:
+    # A bare date at 00:00 UTC is the evening before in Eastern time.
+    return int(ts) % 86400 == 0
+
+
+def _bucket_start(ts: float, bucket: int | str) -> int:
+    local = datetime.fromtimestamp(ts, ET)
+    if bucket == "week":
+        monday = local.date() - timedelta(days=local.weekday())
+        return int(datetime(monday.year, monday.month, monday.day, tzinfo=ET).timestamp())
+    if bucket == "day":
+        return day_start(ts)
+    if bucket == "month":
+        return int(datetime(local.year, local.month, 1, tzinfo=ET).timestamp())
+    start = local.replace(hour=local.hour // bucket * bucket, minute=0,
+                          second=0, microsecond=0)
+    return int(start.timestamp())
+
+
+def aggregate(bars: Sequence[Bar], hours: int | str) -> list[Bar]:
+    """Roll bars up into ``hours``-hour, weekly or monthly bars.
 
     Buckets are aligned to the Eastern clock (04:00, 08:00, 12:00, 16:00,
     20:00 for 4h), so a 4h bar never straddles two trading days and the
-    extended-hours session splits the way chart platforms show it.
+    extended-hours session splits the way chart platforms show it. Weeks
+    start on Monday and months on the 1st, both at midnight Eastern.
     """
     out: list[Bar] = []
     key = None
     for bar in bars:
-        local = datetime.fromtimestamp(bar.ts, ET)
-        start = local.replace(hour=local.hour // hours * hours, minute=0,
-                              second=0, microsecond=0)
-        k = int(start.timestamp())
+        k = _bucket_start(bar.ts, hours)
         if k != key:
             out.append(Bar(symbol=bar.symbol, ts=k, open=bar.open, high=bar.high,
                            low=bar.low, close=bar.close, volume=bar.volume))
@@ -286,6 +322,14 @@ class CandleStore:
             ).fetchone()
         return row is not None
 
+    def source_of(self, symbol: str, bar_size: str, ts: float) -> str | None:
+        """Where the stored bar at ``ts`` came from, or None if there is none."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT source FROM bars WHERE symbol = ? AND bar_size = ?"
+                " AND ts = ?", (symbol.upper(), bar_size, int(ts))).fetchone()
+        return row["source"] if row else None
+
     def prune(self, symbol: str, bar_size: str, before: float) -> int:
         """Drop bars older than ``before`` for one series.
 
@@ -379,6 +423,7 @@ class CandleService:
         start: float,
         end: float,
         bar_size: str,
+        outside_rth: bool | None = None,
     ) -> tuple[list[Bar], str, list[str]]:
         """Ask each broker in turn until one supplies bars."""
         errors: list[str] = []
@@ -391,13 +436,21 @@ class CandleService:
                     start,
                     end,
                     bar_size=bar_size,
-                    outside_rth=self.settings.candle_outside_rth,
+                    # A daily bar is the regular session, as every chart
+                    # platform draws it.
+                    outside_rth=(outside_rth if outside_rth is not None
+                                 else bar_size != DAILY
+                                 and self.settings.candle_outside_rth),
                 )
             except Exception as exc:
                 errors.append(f"{broker.name}: {exc}")
                 continue
             if bars is None:      # adapter cannot do bars at all
                 continue
+            if bar_size == DAILY:
+                bars = [Bar(symbol=b.symbol, ts=day_start(b.ts), open=b.open,
+                            high=b.high, low=b.low, close=b.close,
+                            volume=b.volume) for b in bars]
             return bars, broker.name, errors
         return [], "", errors
 
@@ -452,8 +505,13 @@ class CandleService:
             ranges = [(window_start, now)]
             reason = "empty cache: full backfill"
         else:
-            # Head: history does not reach back far enough yet.
-            if oldest > window_start + 86400:
+            # Head: history does not reach back far enough yet. Daily
+            # history stops where the symbol starts trading, so once asked
+            # for, a head the broker had nothing for is not asked again.
+            if oldest > window_start + 86400 and not (
+                bar_size == DAILY
+                and self.store.was_fetched(symbol, window_start, oldest, bar_size)
+            ):
                 ranges.append((window_start, float(oldest)))
             # Tail: everything since the newest cached bar. Always at least
             # the refresh window, so the still-forming bar gets corrected.
@@ -462,7 +520,9 @@ class CandleService:
             )
             ranges.append((tail_start, now))
             # Interior: a span we never filled, e.g. the server was off.
-            gaps = [
+            # Daily bars have none worth chasing: the whole window comes in
+            # one request, and weekends and holidays are the only holes.
+            gaps = [] if bar_size == DAILY else [
                 (a, b)
                 for a, b in self.store.interior_gaps(
                     symbol, window_start, now,
@@ -494,9 +554,12 @@ class CandleService:
             if bars:
                 written += self.store.upsert(bars, source=used, bar_size=bar_size)
 
+        if bar_size == DAILY:
+            errors.extend(self._today_from_intraday(brokers, symbol, now))
+
         # Fine-grained series exist only to time the current session, so they
         # are pruned rather than accumulated.
-        if bar_size != self.settings.candle_bar_size:
+        if bar_size not in (self.settings.candle_bar_size, DAILY):
             self.store.prune(symbol, bar_size, window_start)
 
         oldest, newest, count = self.store.coverage(symbol, bar_size)
@@ -515,6 +578,29 @@ class CandleService:
             "errors": errors,
         }
 
+    def _today_from_intraday(self, brokers: Sequence[Any], symbol: str,
+                             now: float) -> list[str]:
+        """Stand in for today's daily bar until the broker publishes it.
+
+        Schwab adds a day's candle hours after the close, so without this the
+        daily chart is a day behind all session. Today's bar is rolled up from
+        30-minute regular-session bars and stored like any other; the
+        broker's own candle replaces it once it arrives.
+        """
+        today = day_start(now)
+        local = datetime.fromtimestamp(now, ET)
+        if local.weekday() >= 5 or (local.hour, local.minute) < (9, 30):
+            return []
+        if self.store.source_of(symbol, DAILY, today) not in (None, "intraday"):
+            return []   # the broker's own candle is in
+        bars, _, errors = self._fetch(brokers, symbol, today, now, "30min",
+                                      outside_rth=False)
+        if not bars:
+            return errors
+        self.store.upsert(aggregate(bars, "day"), source="intraday",
+                          bar_size=DAILY)
+        return errors
+
     def series(
         self,
         brokers: Sequence[Any],
@@ -524,6 +610,7 @@ class CandleService:
         bar_size: str | None = None,
         max_bars: int = 6000,
     ) -> dict[str, Any]:
+        """Bars for one chart. ``1d``/``1w``/``1mo`` cover all of ``days``."""
         bar_size = bar_size or self.settings.candle_bar_size
         days = days or self.settings.candle_days
         stored, per = DERIVED.get(bar_size, (bar_size, 1))
@@ -532,12 +619,18 @@ class CandleService:
             # Only the recent window is kept fresh here; anything older is
             # the deep backfill's job, so a long chart never triggers a huge
             # fetch on every refresh.
-            meta = self.refresh(brokers, symbol,
-                                min(days, self.settings.candle_days), stored)
+            # Daily bars are the exception: decades of them are one small
+            # request, so the whole range is fetched here.
+            meta = self.refresh(
+                brokers, symbol,
+                days if stored == DAILY else min(days, self.settings.candle_days),
+                stored)
         now = time.time()
         bars = self.store.bars(symbol, now - days * 86400, now, stored)
-        if per > 1:
+        if per != 1:
             bars = aggregate(bars, per)
+        if stored == DAILY:
+            max_bars = max(max_bars, 20000)   # back to the 1950s for an index
         truncated = len(bars) > max_bars
         if truncated:
             bars = bars[-max_bars:]
@@ -545,13 +638,15 @@ class CandleService:
         return {
             "symbol": symbol.upper(),
             "bar_size": bar_size,
-            "outside_rth": self.settings.candle_outside_rth,
+            "outside_rth": stored != DAILY and self.settings.candle_outside_rth,
             "days": days,
             # [ts, o, h, l, c, v] per bar.
             "bars": [b.to_row() for b in bars],
             "truncated": truncated,
             "history_oldest": oldest,
-            "history_complete": self.store.history_complete(symbol, stored),
+            # Daily history arrives whole with the request, not by backfill.
+            "history_complete": (stored == DAILY
+                                 or self.store.history_complete(symbol, stored)),
             # The front-month contract a continuous future is adjusted to.
             "contract": self.store.version(symbol),
             "refresh": meta,

@@ -784,11 +784,18 @@ const RANGES = [
   { label: '1Y', days: 365 },
   { label: '2Y', days: 730 },
   { label: '5Y', days: 1826 },
-  { label: 'MAX', days: 11000 },
+  { label: 'MAX', days: 20000 },
 ];
-const INTERVALS = [{ label: '1H', value: '1h' }, { label: '4H', value: '4h' }];
-//: Most candles drawn at once; past this a candle is under a pixel wide.
-const MAX_DRAWN_BARS = 5000;
+const INTERVALS = [
+  { label: '1H', value: '1h' }, { label: '4H', value: '4h' },
+  { label: 'D', value: '1d' }, { label: 'W', value: '1w' }, { label: 'M', value: '1mo' },
+];
+const ET_ZONE = 'America/New_York';
+//: Whole-day bars: regular session only, stamped midnight Eastern.
+const DAY_BARS = new Set(['1d', '1w', '1mo']);
+const isDayBars = () => DAY_BARS.has(barSize);
+//: Most candles drawn at once: every NDX trading day since 1985 fits.
+const MAX_DRAWN_BARS = 15000;
 //: Keltner channel: EMA of close, plus/minus a multiple of ATR.
 const KELTNER = { emaLength: 20, atrLength: 10, multiplier: 2 };
 
@@ -799,7 +806,8 @@ const store = (key, value) => {
   try { localStorage.setItem(key, value); } catch { /* storage off */ }
 };
 let rangeDays = Number(stored('chart-range-days', 5)) || 5;
-let barSize = stored('chart-bar-size', '1h') === '4h' ? '4h' : '1h';
+let barSize = stored('chart-bar-size', '1h');
+if (!INTERVALS.some((i) => i.value === barSize)) barSize = '1h';
 let showKeltner = stored('chart-keltner', 'on') !== 'off';
 let candleData = {};
 let expandedSymbol = null;
@@ -844,7 +852,8 @@ function renderRangePicker() {
 }
 
 /** Days to load: the range plus enough earlier bars to warm Keltner up. */
-const loadDays = () => Math.min(12000, rangeDays + (barSize === '4h' ? 20 : 6));
+const WARMUP_DAYS = { '1h': 6, '4h': 20, '1d': 45, '1w': 220, '1mo': 900 };
+const loadDays = () => Math.min(25000, rangeDays + WARMUP_DAYS[barSize]);
 
 /** The bars drawn for a symbol: in range, at most MAX_DRAWN_BARS, newest. */
 function visibleBars(symbol) {
@@ -924,7 +933,7 @@ async function refreshCandles(refresh = true) {
 // live quote: its close moves, its high and low stretch. The next download
 // replaces it with the broker's own bar. Only the traded symbols have a quote.
 
-const BAR_SECONDS = { '1h': 3600, '4h': 14400 };
+const BAR_SECONDS = { '1h': 3600, '4h': 14400, '1d': 86400, '1w': 7 * 86400, '1mo': 31 * 86400 };
 const liveQuotes = {};
 
 function applyLiveQuote(sym) {
@@ -938,6 +947,9 @@ function applyLiveQuote(sym) {
   const lastBar = bars[bars.length - 1];
   const at = q.timestamp || Date.now() / 1000;
   if (at < lastBar[0]) return false;
+  // A day, week or month bar is only moved in place: where the next one
+  // starts is the calendar's call, and the next download brings it.
+  if (isDayBars() && (at >= lastBar[0] + period || !isRegularSession(at))) return false;
   if (at < lastBar[0] + period) {
     const [, , h, l, c] = lastBar;
     if (c === price && h >= price && l <= price) return false;
@@ -1103,7 +1115,8 @@ function candleChart(symbol, data) {
 
   // Extended-hours bars are in the data but look identical to regular ones
   // without this, which reads as "extended hours are missing".
-  const extended = bars.map((b) => !isRegularSession(b[0]));
+  const dayBars = isDayBars();
+  const extended = bars.map((b) => !dayBars && !isRegularSession(b[0]));
   const sessionBands = [];
   let runStart = null;
   for (let i = 0; i <= bars.length; i++) {
@@ -1170,13 +1183,17 @@ function candleChart(symbol, data) {
 
   const first = new Date(bars[0][0] * 1000);
   const last = new Date(bars[bars.length - 1][0] * 1000);
-  const long = rangeDays > 300;
+  const long = rangeDays > 300 || dayBars;
   const stamp = (d) => d.toLocaleString('en-US', long
-    ? { year: 'numeric', month: 'short', day: 'numeric' }
+    ? { year: 'numeric', month: 'short', day: 'numeric', ...(dayBars ? { timeZone: ET_ZONE } : {}) }
     : { month: 'short', day: 'numeric', hour: 'numeric' });
   const capped = from > 0 && all.length - from >= MAX_DRAWN_BARS
     ? ` · showing the newest ${MAX_DRAWN_BARS} bars${barSize === '1h' ? ' (4H shows further back)' : ''}`
     : '';
+  const sessionNote = dayBars
+    ? '· regular session'
+    : `· <span class="band-key"></span> ${extendedCount} extended-hours
+      (${bars.length - extendedCount} regular session)`;
 
   return `<figure class="chart-figure candle-figure" data-symbol="${esc(symbol)}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
@@ -1192,8 +1209,7 @@ function candleChart(symbol, data) {
       · ${bars.length} × ${esc(data.bar_size || '1h')} bars${capped}
       ${showKeltner ? `· <span class="keltner-key"></span> Keltner ${KELTNER.emaLength}, ${KELTNER.multiplier}×ATR ${KELTNER.atrLength}${kNow
         ? ` now <span class="keltner-now">${kNow.upper.toFixed(2)} / ${kNow.mid.toFixed(2)} / ${kNow.lower.toFixed(2)}</span> (upper / mid / lower)` : ''}` : ''}
-      · <span class="band-key"></span> ${extendedCount} extended-hours
-      (${bars.length - extendedCount} regular session)</figcaption>
+      ${sessionNote}</figcaption>
   </figure>`;
 }
 
@@ -1226,8 +1242,10 @@ function attachCandleCrosshair(symbol) {
     const x = M.left + slot * (i + 0.5);
     line.setAttribute('x1', x); line.setAttribute('x2', x);
     line.style.display = '';
-    const when = new Date(ts * 1000).toLocaleString('en-US',
-      { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const when = new Date(ts * 1000).toLocaleString('en-US', isDayBars()
+      ? { weekday: barSize === '1d' ? 'short' : undefined, year: 'numeric',
+        month: 'short', day: barSize === '1mo' ? undefined : 'numeric', timeZone: ET_ZONE }
+      : { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     tip.innerHTML = `<div class="tip-date">${esc(when)}</div>
       <div class="tip-row"><span>O</span><span class="tip-value">${o.toFixed(2)}</span></div>
       <div class="tip-row"><span>H</span><span class="tip-value">${h.toFixed(2)}</span></div>

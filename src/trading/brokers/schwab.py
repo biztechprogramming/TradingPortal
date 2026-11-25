@@ -157,6 +157,9 @@ class _TokenStore:
         return self._data
 
 
+#: Chart-only index symbols, which Schwab spells with a leading "$".
+SCHWAB_INDEXES = {"NDX", "SPX", "VIX", "RUT"}
+
 class SchwabBroker(Broker):
     """One Schwab *account*, reached through one Schwab *login*.
 
@@ -669,20 +672,23 @@ class SchwabBroker(Broker):
         # Schwab's minute bars are native; only the hourly series has to be
         # built by aggregation, since frequencyType=minute tops out at 30.
         native = {"1min": 1, "5min": 5, "10min": 10, "15min": 15, "30min": 30}
-        if bar_size not in native and bar_size != "1h":
+        if bar_size not in native and bar_size not in ("1h", "1d"):
             return None
         if symbol.upper() in FUTURES_ROOTS:
             return None   # a futures root is not a Schwab equity symbol
         frequency = native.get(bar_size, 30)
+        daily = bar_size == "1d"
+        # Schwab names an index with a leading "$"; plain NDX finds nothing.
+        wire = f"${symbol.upper()}" if symbol.upper() in SCHWAB_INDEXES else symbol.upper()
 
         resp = self._request(
             "GET",
             "/marketdata/v1/pricehistory",
             params={
-                "symbol": symbol.upper(),
-                "periodType": "day",
-                "frequencyType": "minute",
-                "frequency": frequency,
+                "symbol": wire,
+                "periodType": "year" if daily else "day",
+                "frequencyType": "daily" if daily else "minute",
+                "frequency": 1 if daily else frequency,
                 "startDate": int(start * 1000),
                 "endDate": int(end * 1000),
                 "needExtendedHoursData": "true" if outside_rth else "false",

@@ -642,7 +642,9 @@ class IBKRBroker(Broker):
         span_days = max(1, math.ceil((time.time() - start) / 86400.0))
         params = {
             "conid": str(conid),
-            "period": f"{span_days}d",
+            # The period field caps day counts well under a decade.
+            "period": f"{span_days}d" if span_days <= 365
+                      else f"{math.ceil(span_days / 365)}y",
             "bar": bar_size,
             "outsideRth": "true" if outside_rth else "false",
         }

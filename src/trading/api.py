@@ -376,9 +376,9 @@ def create_app(
     @app.get("/api/candles", dependencies=[Auth])
     def get_candles(
         symbol: str = Query(..., description="Traded symbol, e.g. QQQ"),
-        days: int = Query(0, ge=0, le=12000, description="0 uses CANDLE_DAYS"),
+        days: int = Query(0, ge=0, le=25000, description="0 uses CANDLE_DAYS"),
         refresh: bool = Query(True),
-        bar_size: str = Query("1h", pattern="^(1h|4h)$"),
+        bar_size: str = Query("1h", pattern="^(1h|4h|1d|1w|1mo)$"),
     ) -> dict[str, Any]:
         sym = symbol.upper().strip()
         # Charts cover the reference symbols too; trading does not. The order

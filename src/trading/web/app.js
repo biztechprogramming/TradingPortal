@@ -2015,6 +2015,9 @@ function channelPrices(sym, side) {
  * starts at the bid so it fills, because an unfilled sell is cancelled at the
  * fill timeout. Every default is one click away from any other price.
  */
+/** Cents past the ask (buy) or under the bid (sell) offered as fill-now picks. */
+const CHASE_CENTS = [1, 2, 3, 5, 10, 15, 20, 30, 50];
+
 function pickPrices(title, intro, legs) {
   const tick = orderTick();
   // A leg follows the market (its price box tracks the bid) until you touch
@@ -2038,9 +2041,23 @@ function pickPrices(title, intro, legs) {
          <span class="rung-label">${esc(c.label)}</span>
          ${c.anchor ? '<span class="pill pill-anchor">LEVEL</span>' : ''}
        </button>`).join('');
+    // Marketable prices for a fast market: past the ask for a buy, under
+    // the bid for a sell, so the order still fills after the quote moves.
+    const edge = leg.side === 'BUY' ? q.ask : q.bid;
+    const dir = leg.side === 'BUY' ? 1 : -1;
+    const chase = edge > 0 ? CHASE_CENTS.map((c) => {
+      const price = snapToTick(edge + dir * c / 100, tick);
+      return price > 0 ? `<button class="pick-rung pick-chase" data-sym="${esc(leg.sym)}" data-price="${price}">
+         <span class="rung-price">${fmtTick(price)}</span>
+         <span class="rung-label">${leg.side === 'BUY' ? 'Ask +' : 'Bid −'}${fmtTick(c / 100)}</span>
+       </button>` : '';
+    }).join('') : '';
     return `<div class="pick-chips">${chip('Bid', q.bid)}${chip('Mid', mid)}${chip('Ask', q.ask)}${chip('Last', q.last)}</div>
       <div class="order-hint pick-hint" id="pick-hint-${esc(leg.sym)}"></div>
-      ${rungs ? `<div class="pick-rungs">${rungs}</div>` : ''}`;
+      ${chase ? `<div class="pick-sub muted">Fill now — ${leg.side === 'BUY' ? 'above the ask' : 'below the bid'}</div>
+        <div class="pick-rungs">${chase}</div>` : ''}
+      ${rungs ? `<div class="pick-sub muted">Wait — ${leg.side === 'BUY' ? 'below the ask' : 'above the bid'}</div>
+        <div class="pick-rungs">${rungs}</div>` : ''}`;
   };
   const legHtml = legs.map((leg) => `<div class="pick-leg">
       <div class="pick-head"><strong>${esc(leg.title)}</strong></div>
